@@ -12,16 +12,31 @@ struct MainAssistantView: View {
                 Color(red: 0.082, green: 0.094, blue: 0.110)
                     .ignoresSafeArea()
 
-                ScrollView {
-                    VStack(spacing: 12) {
-                        // 1. PiP & Background Screenshot Auto-Sync Card
-                        PiPPreviewCardView(
-                            pipManager: viewModel.pipManager,
-                            isAutoSyncEnabled: viewModel.screenshotMonitor.isMonitoring,
-                            onToggleAutoSync: {
-                                viewModel.toggleAutoScreenshotSync()
-                            }
-                        )
+                VStack(spacing: 8) {
+                    Picker("運作模式", selection: $viewModel.isLiveWebMode) {
+                        Text("📸 官方 App 雙開同步").tag(false)
+                        Text("⚡ 內建實時直連 (免截圖)").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+
+                    if viewModel.isLiveWebMode {
+                        liveWebAssistantWorkspace
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 12) {
+                                // 1. PiP & Background Screenshot Auto-Sync Card
+                                PiPPreviewCardView(
+                                    pipManager: viewModel.pipManager,
+                                    isAutoSyncEnabled: viewModel.screenshotMonitor.isMonitoring,
+                                    onTogglePiP: {
+                                        viewModel.togglePiPWithAutoSync()
+                                    },
+                                    onToggleAutoSync: {
+                                        viewModel.toggleAutoScreenshotSync()
+                                    }
+                                )
 
                         // 防誤封與隱私保護狀態列
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -322,6 +337,8 @@ struct MainAssistantView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                 }
+                    } // end if/else isLiveWebMode
+                } // end outer VStack
             }
             .navigationTitle("Chess Bot 輔助大師")
             .navigationBarTitleDisplayMode(.inline)
@@ -387,6 +404,131 @@ struct MainAssistantView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var liveWebAssistantWorkspace: some View {
+        let primary = viewModel.engineService.currentAnalysis?.primaryLine
+        let lines = Array((viewModel.engineService.currentAnalysis?.lines ?? []).prefix(3))
+        let evalText = primary?.formattedScore ?? "0.00"
+        let winPct = Int((primary?.winProbability(for: viewModel.perspective) ?? 50.0).rounded())
+        let depthStr = viewModel.engineService.currentAnalysis.map { "D\($0.depthReached)" } ?? "..."
+
+        VStack(spacing: 8) {
+            // Compact Live Multi-PV Strip
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(evalText)
+                        .font(.system(size: 20, weight: .heavy, design: .monospaced))
+                        .foregroundColor(.white)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("輪到 \(viewModel.boardState.sideToMove.displayName) • 勝率 \(winPct)%")
+                            .font(.caption.bold())
+                            .foregroundColor(Color(white: 0.85))
+                        Text("\(depthStr) • 實時 DOM 同步中 (免截圖)")
+                            .font(.caption2)
+                            .foregroundColor(accentGreen)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        viewModel.engineService.coachPieceOnlyHintMode.toggle()
+                    } label: {
+                        Text(viewModel.engineService.coachPieceOnlyHintMode ? "🎓 半提示" : "全箭頭")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(viewModel.engineService.coachPieceOnlyHintMode ? Color.orange.opacity(0.25) : accentGreen.opacity(0.22))
+                            .foregroundColor(viewModel.engineService.coachPieceOnlyHintMode ? .orange : accentGreen)
+                            .clipShape(Capsule())
+                    }
+
+                    Button {
+                        viewModel.reloadLiveWebBoard()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.caption.bold())
+                            .padding(6)
+                            .background(Color.white.opacity(0.10))
+                            .foregroundColor(.white)
+                            .clipShape(Circle())
+                    }
+                }
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
+                            let rankColors: [Color] = [accentGreen, .cyan, .orange]
+                            let pillColor = rankColors[min(idx, rankColors.count - 1)]
+                            let labelText: String = {
+                                if viewModel.isFairPlaySafetyLocked {
+                                    return "#\(idx + 1) 已鎖定"
+                                } else if viewModel.engineService.coachPieceOnlyHintMode {
+                                    let pName = viewModel.boardState.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
+                                    return "#\(idx + 1) 動\(pName) \(line.bestMove.from.algebraic) (\(line.formattedScore))"
+                                } else {
+                                    return "#\(idx + 1) \(line.bestMove.san) (\(line.formattedScore))"
+                                }
+                            }()
+
+                            Text(labelText)
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(pillColor.opacity(0.16))
+                                .foregroundColor(.white)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(pillColor.opacity(0.65), lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(red: 0.11, green: 0.14, blue: 0.18))
+            )
+
+            // Side-by-side Eval Bar + Built-in Live Chess.com Computer Board WebView
+            HStack(spacing: 6) {
+                EvalBarView(
+                    analysis: viewModel.engineService.currentAnalysis,
+                    perspective: viewModel.perspective,
+                    isAnalyzing: viewModel.engineService.isAnalyzing
+                )
+
+                LiveChessWebView(
+                    lines: viewModel.engineService.currentAnalysis?.lines ?? [],
+                    showArrows: viewModel.engineService.autoHintEnabled
+                        && !viewModel.isFairPlaySafetyLocked
+                        && !viewModel.engineService.coachPieceOnlyHintMode,
+                    coachPieceOnly: viewModel.engineService.coachPieceOnlyHintMode
+                        && viewModel.engineService.autoHintEnabled
+                        && !viewModel.isFairPlaySafetyLocked,
+                    reloadToken: viewModel.liveWebReloadToken,
+                    onBoardSync: { fenBoardPart, isFlipped, turnHint in
+                        viewModel.handleLiveWebBoardUpdate(
+                            fenBoardPart: fenBoardPart,
+                            isFlipped: isFlipped,
+                            turnHint: turnHint
+                        )
+                    }
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
     }
 
     private func protectionPill(

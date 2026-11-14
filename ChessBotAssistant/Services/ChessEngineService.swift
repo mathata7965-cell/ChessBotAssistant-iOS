@@ -8,7 +8,7 @@ final class ChessEngineService: ObservableObject {
     @Published var useCloudStockfish: Bool = true
 
     // 防誤封與隱私隔離保護設定
-    @Published var zeroNetworkIsolationMode: Bool = true
+    @Published var zeroNetworkIsolationMode: Bool = false
     @Published var humanMatchSafetyLockEnabled: Bool = true
     @Published var coachPieceOnlyHintMode: Bool = false
 
@@ -422,6 +422,38 @@ private enum LocalAlphaBetaEngine {
         }
     }
 
+    private static func rootPositionalTieBreaker(for move: ChessMove, board: ChessBoardState) -> Int {
+        var bonus = 0
+        let openingBonuses: [String: Int] = [
+            "e2e4": 12, "d2d4": 11, "f1b5": 9, "f1c4": 8,
+            "g1f3": 6, "b1c3": 5, "c2c4": 6,
+            "e7e5": 11, "d7d5": 10, "c7c5": 10, "g8f6": 6,
+            "e7e6": 6, "c7c6": 5
+        ]
+        if board.fullMoveNumber <= 8, let openBonus = openingBonuses[move.uci] {
+            bonus += openBonus
+        }
+
+        if let piece = board.piece(at: move.from) {
+            if piece.type == .king && abs(move.to.col - move.from.col) == 2 {
+                bonus += 6
+            }
+            let homeRow = piece.color == .white ? 7 : 0
+            if (piece.type == .knight || piece.type == .bishop) && move.from.row == homeRow && move.to.row != homeRow {
+                bonus += 3
+            }
+            if (3...4).contains(move.to.row) && (3...4).contains(move.to.col) {
+                bonus += 3
+            } else if (2...5).contains(move.to.row) && (2...5).contains(move.to.col) {
+                bonus += 1
+            }
+            if piece.type == .pawn && board.fullMoveNumber <= 6 && (move.from.col == 0 || move.from.col == 7) {
+                bonus -= 2
+            }
+        }
+        return bonus
+    }
+
     static func analyze(
         board: ChessBoardState,
         maxDepth: Int,
@@ -473,7 +505,10 @@ private enum LocalAlphaBetaEngine {
                     pvOut: &childPV
                 )
                 if ctx.cancelled { break }
-                currentResults.append((move, score, [move] + childPV))
+                let tieBreaker = abs(score) < mateScore - 200
+                    ? rootPositionalTieBreaker(for: move, board: board)
+                    : 0
+                currentResults.append((move, score + tieBreaker, [move] + childPV))
             }
 
             if !ctx.cancelled && !currentResults.isEmpty {
@@ -486,7 +521,7 @@ private enum LocalAlphaBetaEngine {
         }
 
         if bestScoredMoves.isEmpty {
-            bestScoredMoves = orderedInitial.map { ($0, 0, [$0]) }
+            bestScoredMoves = orderedInitial.map { ($0, rootPositionalTieBreaker(for: $0, board: board), [$0]) }
         }
 
         let pvCount = min(multiPV, bestScoredMoves.count)

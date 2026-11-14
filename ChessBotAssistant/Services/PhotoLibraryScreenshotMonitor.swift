@@ -14,6 +14,7 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
     private var fetchResult: PHFetchResult<PHAsset>?
     private var lastProcessedAssetID: String?
     private var lastProcessedAsset: PHAsset?
+    private var pollTimer: Timer?
 
     override init() {
         super.init()
@@ -56,13 +57,68 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
             self.lastProcessedAssetID = initial.firstObject?.localIdentifier
             PHPhotoLibrary.shared().register(self)
             isMonitoring = true
+
+            pollTimer?.invalidate()
+            let timer = Timer(timeInterval: 0.75, repeats: true) { [weak self] timer in
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                Task { @MainActor [weak self] in
+                    self?.pollLatestScreenshotAsset()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            pollTimer = timer
         }
     }
 
     func stopMonitoring() {
+        pollTimer?.invalidate()
+        pollTimer = nil
         if isMonitoring {
             PHPhotoLibrary.shared().unregisterChangeObserver(self)
             isMonitoring = false
+        }
+    }
+
+    private func pollLatestScreenshotAsset() {
+        guard isMonitoring else { return }
+
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.fetchLimit = 1
+
+        let latest = PHAsset.fetchAssets(with: options)
+        guard let asset = latest.firstObject else { return }
+        guard asset.localIdentifier != lastProcessedAssetID else { return }
+        guard let creationDate = asset.creationDate,
+              Date().timeIntervalSince(creationDate) <= 20 else {
+            return
+        }
+
+        lastProcessedAssetID = asset.localIdentifier
+        lastProcessedAsset = asset
+        lastDetectedScreenshotDate = creationDate
+        hasDeletableScreenshot = true
+
+        let reqOptions = PHImageRequestOptions()
+        reqOptions.deliveryMode = .highQualityFormat
+        reqOptions.isNetworkAccessAllowed = true
+        reqOptions.isSynchronous = false
+
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: PHImageManagerMaximumSize,
+            contentMode: .default,
+            options: reqOptions
+        ) { [weak self] image, info in
+            let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            guard !isDegraded, let image else { return }
+            Task { @MainActor [weak self] in
+                self?.onNewScreenshot?(image)
+            }
         }
     }
 

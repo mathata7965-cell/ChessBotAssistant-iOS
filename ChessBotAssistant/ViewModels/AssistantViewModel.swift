@@ -21,6 +21,8 @@ final class AssistantViewModel: ObservableObject {
     @Published var lastScannedFullImage: UIImage?
     @Published var isFairPlaySafetyLocked: Bool = false
     @Published var safetyLockReason: String?
+    @Published var isLiveWebMode: Bool = false
+    @Published var liveWebReloadToken: UUID = UUID()
 
     @Published var showEngineSettingsSheet: Bool = false
     @Published var showScreenshotScannerSheet: Bool = false
@@ -37,6 +39,14 @@ final class AssistantViewModel: ObservableObject {
     init() {
         setupBindings()
         triggerAnalysis()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ok = await self.screenshotMonitor.requestPermissionAndStart()
+            if ok {
+                self.pipManager.startSilentAudioKeepAlive()
+                self.syncPiPContent()
+            }
+        }
     }
 
     private func setupBindings() {
@@ -281,12 +291,16 @@ final class AssistantViewModel: ObservableObject {
     func toggleAutoScreenshotSync() {
         if screenshotMonitor.isMonitoring {
             screenshotMonitor.stopMonitoring()
+            if !pipManager.isPiPActive {
+                pipManager.stopSilentAudioKeepAlive()
+            }
             showBanner("已暫停背景截圖自動同步")
             syncPiPContent()
         } else {
             Task {
                 let ok = await screenshotMonitor.requestPermissionAndStart()
                 if ok {
+                    pipManager.startSilentAudioKeepAlive()
                     showBanner("已開啟截圖自動同步！在 Chess.com 截圖即可更新")
                 } else {
                     showBanner("需要「相簿讀取」權限才能自動偵測截圖")
@@ -294,6 +308,105 @@ final class AssistantViewModel: ObservableObject {
                 syncPiPContent()
             }
         }
+    }
+
+    func togglePiPWithAutoSync() {
+        if !pipManager.isPiPActive {
+            Task {
+                if !screenshotMonitor.isMonitoring {
+                    _ = await screenshotMonitor.requestPermissionAndStart()
+                }
+                pipManager.startSilentAudioKeepAlive()
+                syncPiPContent()
+                pipManager.togglePiP()
+            }
+        } else {
+            pipManager.togglePiP()
+            syncPiPContent()
+        }
+    }
+
+    func reloadLiveWebBoard() {
+        liveWebReloadToken = UUID()
+    }
+
+    func handleLiveWebBoardUpdate(
+        fenBoardPart: String,
+        isFlipped: Bool,
+        turnHint: PieceColor? = nil
+    ) {
+        let newPerspective: PieceColor = isFlipped ? .black : .white
+        let perspectiveChanged = perspective != newPerspective
+        if perspectiveChanged {
+            perspective = newPerspective
+        }
+
+        let currentFENBoard = boardState.toFEN().split(separator: " ").first.map(String.init) ?? ""
+        if currentFENBoard == fenBoardPart {
+            if let turnHint, boardState.sideToMove != turnHint {
+                boardState.sideToMove = turnHint
+                clearSelection()
+                triggerAnalysis()
+            } else if perspectiveChanged {
+                syncPiPContent()
+            }
+            return
+        }
+
+        let candidateSides: [PieceColor] = [boardState.sideToMove, boardState.sideToMove.opposite]
+        for seedSide in candidateSides {
+            var seed = boardState
+            seed.sideToMove = seedSide
+            for move in seed.legalMoves() {
+                let after = seed.applying(move)
+                let afterBoardPart = after.toFEN().split(separator: " ").first.map(String.init) ?? ""
+                if afterBoardPart == fenBoardPart {
+                    if let turnHint, after.sideToMove != turnHint {
+                        continue
+                    }
+                    history.append(boardState)
+                    moveHistorySAN.append(move.san)
+                    boardState = after
+                    lastMove = move
+                    isFairPlaySafetyLocked = false
+                    safetyLockReason = nil
+                    clearSelection()
+                    triggerAnalysis()
+                    return
+                }
+            }
+        }
+
+        let isStartPos = (fenBoardPart == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
+        let inferredSide: PieceColor = isStartPos ? .white : (turnHint ?? newPerspective)
+
+        guard let rawBoard = ChessBoardState(fen: "\(fenBoardPart) \(inferredSide.fenChar) - - 0 1") else {
+            return
+        }
+        var castling = CastlingRights.none
+        if rawBoard.squares[7][4] == ChessPiece(color: .white, type: .king) {
+            if rawBoard.squares[7][7] == ChessPiece(color: .white, type: .rook) { castling.whiteKingside = true }
+            if rawBoard.squares[7][0] == ChessPiece(color: .white, type: .rook) { castling.whiteQueenside = true }
+        }
+        if rawBoard.squares[0][4] == ChessPiece(color: .black, type: .king) {
+            if rawBoard.squares[0][7] == ChessPiece(color: .black, type: .rook) { castling.blackKingside = true }
+            if rawBoard.squares[0][0] == ChessPiece(color: .black, type: .rook) { castling.blackQueenside = true }
+        }
+        var fullBoard = rawBoard
+        fullBoard.castlingRights = castling
+
+        if isStartPos {
+            history.removeAll()
+            moveHistorySAN.removeAll()
+        } else {
+            history.append(boardState)
+        }
+        boardState = fullBoard
+        lastMove = nil
+        isFairPlaySafetyLocked = false
+        safetyLockReason = nil
+        clearSelection()
+        triggerAnalysis()
     }
 
     func scanLatestScreenshot() {
@@ -312,11 +425,13 @@ final class AssistantViewModel: ObservableObject {
         isScanningScreenshot = true
         lastScannedFullImage = image
         let fallbackPerspective = perspective
+        let prevBoard = boardState
         let result = await Task.detached(priority: .userInitiated) {
             await ScreenshotBoardRecognizer.shared.recognizeBoard(
                 from: image,
                 fallbackPerspective: fallbackPerspective,
-                sideToMove: nil
+                sideToMove: nil,
+                previousBoard: prevBoard
             )
         }.value
 
@@ -366,13 +481,8 @@ final class AssistantViewModel: ObservableObject {
     }
 
     func applyRecognizedBoard(_ result: RecognizedBoardResult, keepSideToMoveIfSameBoard: Bool = false) {
-        var newBoard = result.boardState
-        if keepSideToMoveIfSameBoard {
-            // Default to the player's own perspective side so the assistant immediately advises the user's move
-            newBoard.sideToMove = result.detectedPerspective
-        } else {
-            newBoard.sideToMove = perspective
-        }
+        let newBoard = result.boardState
+        _ = keepSideToMoveIfSameBoard
         history.append(boardState)
         boardState = newBoard
         perspective = result.detectedPerspective

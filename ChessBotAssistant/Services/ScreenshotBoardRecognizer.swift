@@ -22,7 +22,8 @@ final class ScreenshotBoardRecognizer: Sendable {
     func recognizeBoard(
         from image: UIImage,
         fallbackPerspective: PieceColor = .white,
-        sideToMove: PieceColor? = nil
+        sideToMove: PieceColor? = nil,
+        previousBoard: ChessBoardState = .startingPosition
     ) async -> RecognizedBoardResult? {
         guard let uprightCG = normalizedCGImage(from: image) else { return nil }
         let imgW = uprightCG.width
@@ -58,7 +59,8 @@ final class ScreenshotBoardRecognizer: Sendable {
         let classification = classify64Squares(
             boardCGImage: croppedBoard,
             perspective: detectedPerspective,
-            sideToMove: sideToMove ?? detectedPerspective
+            preferredSideToMove: sideToMove,
+            previousBoard: previousBoard
         )
 
         let croppedUI = UIImage(cgImage: croppedBoard)
@@ -213,9 +215,9 @@ final class ScreenshotBoardRecognizer: Sendable {
 
         for r in 0..<8 {
             for c in 0..<8 {
-                // Sample top-left corner of cell (less likely to be covered by a piece)
-                let px = min(bufW - 1, max(0, x + Int((Double(c) + 0.14) * cell)))
-                let py = min(bufH - 1, max(0, y + Int((Double(r) + 0.14) * cell)))
+                // Sample upper-right area of cell (less likely to be covered by a piece or rank/file coordinate)
+                let px = min(bufW - 1, max(0, x + Int((Double(c) + 0.84) * cell)))
+                let py = min(bufH - 1, max(0, y + Int((Double(r) + 0.12) * cell)))
                 let idx = (py * bufW + px) * 4
                 let lum = 0.299 * Double(rgba[idx]) + 0.587 * Double(rgba[idx + 1]) + 0.114 * Double(rgba[idx + 2])
                 if (r + c) % 2 == 0 {
@@ -237,9 +239,9 @@ final class ScreenshotBoardRecognizer: Sendable {
         for d in darkLums where abs(d - darkMed) < 22.0 { parityMatches += 1 }
 
         // Check sharp transitions along internal vertical boundaries (7 lines)
-        var boundaryContrast = 0.0
+        var verticalBoundaryContrast = 0.0
         for r in 0..<8 {
-            let py = min(bufH - 1, max(0, y + Int((Double(r) + 0.14) * cell)))
+            let py = min(bufH - 1, max(0, y + Int((Double(r) + 0.12) * cell)))
             for c in 1..<8 {
                 let bxLeft = min(bufW - 1, max(0, x + Int(Double(c) * cell) - 2))
                 let bxRight = min(bufW - 1, max(0, x + Int(Double(c) * cell) + 2))
@@ -248,12 +250,29 @@ final class ScreenshotBoardRecognizer: Sendable {
                 let diff = abs(Double(rgba[iL]) - Double(rgba[iR]))
                     + abs(Double(rgba[iL + 1]) - Double(rgba[iR + 1]))
                     + abs(Double(rgba[iL + 2]) - Double(rgba[iR + 2]))
-                boundaryContrast += min(diff, 150.0)
+                verticalBoundaryContrast += min(diff, 150.0)
             }
         }
-        boundaryContrast /= 56.0
+        verticalBoundaryContrast /= 56.0
 
-        return contrast * 0.45 + Double(parityMatches) * 2.2 + boundaryContrast * 0.5
+        // Check sharp transitions along internal horizontal boundaries (7 lines) to prevent rank-shift crops
+        var horizontalBoundaryContrast = 0.0
+        for c in 0..<8 {
+            let px = min(bufW - 1, max(0, x + Int((Double(c) + 0.84) * cell)))
+            for r in 1..<8 {
+                let byTop = min(bufH - 1, max(0, y + Int(Double(r) * cell) - 2))
+                let byBottom = min(bufH - 1, max(0, y + Int(Double(r) * cell) + 2))
+                let iT = (byTop * bufW + px) * 4
+                let iB = (byBottom * bufW + px) * 4
+                let diff = abs(Double(rgba[iT]) - Double(rgba[iB]))
+                    + abs(Double(rgba[iT + 1]) - Double(rgba[iB + 1]))
+                    + abs(Double(rgba[iT + 2]) - Double(rgba[iB + 2]))
+                horizontalBoundaryContrast += min(diff, 150.0)
+            }
+        }
+        horizontalBoundaryContrast /= 56.0
+
+        return contrast * 0.4 + Double(parityMatches) * 2.0 + verticalBoundaryContrast * 0.4 + horizontalBoundaryContrast * 0.8
     }
 
     // MARK: - Orientation Detection via Vision OCR
@@ -319,8 +338,8 @@ final class ScreenshotBoardRecognizer: Sendable {
         let imgW = CGFloat(fullCGImage.width)
         let imgH = CGFloat(fullCGImage.height)
 
-        // Exclude top ~6.5% iOS status bar so phone system clock doesn't trigger false positives
-        let topStripMinY = min(boardPixelRect.minY, imgH * 0.065)
+        // Exclude top ~6.5% iOS status bar and floating PiP region by only inspecting strip immediately above the board
+        let topStripMinY = max(imgH * 0.065, boardPixelRect.minY - imgH * 0.075)
         let topStripHeight = max(0, boardPixelRect.minY - topStripMinY)
         let topRect = CGRect(x: 0, y: topStripMinY, width: imgW, height: topStripHeight)
 
@@ -393,10 +412,22 @@ final class ScreenshotBoardRecognizer: Sendable {
         }
     }
 
+    private struct CellObservation {
+        let boardRow: Int
+        let boardCol: Int
+        let color: PieceColor
+        let guessedPiece: ChessPiece
+        let confidence: Double
+        let kingLikelihood: Double
+        let coverage: Double
+        let isHighlighted: Bool
+    }
+
     private func classify64Squares(
         boardCGImage: CGImage,
         perspective: PieceColor,
-        sideToMove: PieceColor
+        preferredSideToMove: PieceColor?,
+        previousBoard: ChessBoardState
     ) -> (board: ChessBoardState, confidence: Double, notes: String) {
         let normSize = 400 // 50x50 px per square
         guard let rgba = renderRGBABuffer(cgImage: boardCGImage, width: normSize, height: normSize) else {
@@ -404,7 +435,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         }
 
         let cellSize = 50
-        // Estimate global light & dark square RGB from corners
+        // Estimate global light & dark square RGB from upper corners
         var lightR: [Double] = [], lightG: [Double] = [], lightB: [Double] = []
         var darkR: [Double] = [], darkG: [Double] = [], darkB: [Double] = []
 
@@ -422,11 +453,11 @@ final class ScreenshotBoardRecognizer: Sendable {
         let globalLight = RGBColor(r: median(lightR), g: median(lightG), b: median(lightB))
         let globalDark = RGBColor(r: median(darkR), g: median(darkG), b: median(darkB))
 
-        var grid: [[ChessPiece?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
+        var observedGrid: [[CellObservation?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
         var detectedPieceCount = 0
-        var whiteKingCandidates: [(row: Int, col: Int, score: Double)] = []
-        var blackKingCandidates: [(row: Int, col: Int, score: Double)] = []
         var pieceConfidenceSum = 0.0
+        var highlightSquares: Set<BoardSquare> = []
+        var highlightedPieceColor: PieceColor?
 
         for screenRow in 0..<8 {
             for screenCol in 0..<8 {
@@ -439,11 +470,16 @@ final class ScreenshotBoardRecognizer: Sendable {
                     col: screenCol,
                     cellSize: cellSize
                 )
-                // Use local corner if square is highlighted (last move / check highlight), else global BG
-                let bg = localCorner.distance(to: globalBG) > 18.0 ? localCorner : globalBG
+                let bgDist = localCorner.distance(to: globalBG)
+                let isHighlighted = screenRow >= 1 && bgDist > 34.0
+                let bg = bgDist > 18.0 ? localCorner : globalBG
 
                 let boardRow = perspective == .white ? screenRow : (7 - screenRow)
                 let boardCol = perspective == .white ? screenCol : (7 - screenCol)
+                let boardSq = BoardSquare(row: boardRow, col: boardCol)
+                if isHighlighted {
+                    highlightSquares.insert(boardSq)
+                }
 
                 if let result = classifyCell(
                     rgba: rgba,
@@ -453,25 +489,135 @@ final class ScreenshotBoardRecognizer: Sendable {
                     cellSize: cellSize,
                     bg: bg
                 ) {
-                    grid[boardRow][boardCol] = result.piece
+                    observedGrid[boardRow][boardCol] = CellObservation(
+                        boardRow: boardRow,
+                        boardCol: boardCol,
+                        color: result.piece.color,
+                        guessedPiece: result.piece,
+                        confidence: result.confidence,
+                        kingLikelihood: result.kingLikelihood,
+                        coverage: result.coverage,
+                        isHighlighted: isHighlighted
+                    )
                     detectedPieceCount += 1
                     pieceConfidenceSum += result.confidence
-                    if result.piece.type == .king || result.kingLikelihood > 0.45 {
-                        if result.piece.color == .white {
-                            whiteKingCandidates.append((boardRow, boardCol, result.kingLikelihood))
+                    if isHighlighted {
+                        highlightedPieceColor = result.piece.color
+                    }
+                }
+            }
+        }
+
+        let resolvedSideToMove = preferredSideToMove ?? highlightedPieceColor?.opposite ?? perspective
+        let (reconstructedBoard, methodLabel) = reconstructGridFromReference(
+            observed: observedGrid,
+            highlightSquares: highlightSquares,
+            previousBoard: previousBoard,
+            sideToMove: resolvedSideToMove
+        )
+
+        let avgConf = detectedPieceCount > 0 ? (pieceConfidenceSum / Double(detectedPieceCount)) : 0.65
+        let turnNote = resolvedSideToMove.displayName
+        let note = "已辨識 \(detectedPieceCount) 枚棋子（視角：\(perspective.displayName)｜輪到：\(turnNote)｜\(methodLabel)）"
+        return (reconstructedBoard, avgConf, note)
+    }
+
+    private func reconstructGridFromReference(
+        observed: [[CellObservation?]],
+        highlightSquares: Set<BoardSquare>,
+        previousBoard: ChessBoardState,
+        sideToMove: PieceColor
+    ) -> (board: ChessBoardState, methodLabel: String) {
+        // Stage 1: Exact 0-ply, 1-ply, or 2-ply legal move delta match against previousBoard (then startingPosition)
+        if previousBoard != .startingPosition,
+           let matchedPrev = findLegalDeltaMatch(
+               from: previousBoard,
+               observed: observed,
+               highlightSquares: highlightSquares,
+               preferredSideToMove: sideToMove
+           ) {
+            return matchedPrev
+        }
+        if let matchedStart = findLegalDeltaMatch(
+            from: .startingPosition,
+            observed: observed,
+            highlightSquares: highlightSquares,
+            preferredSideToMove: sideToMove
+        ) {
+            return matchedStart
+        }
+
+        // Stage 2: Anchored + Displaced-Piece Assignment (supports arbitrary move count & custom themes)
+        let refBoard: ChessBoardState
+        if previousBoard == .startingPosition {
+            refBoard = .startingPosition
+        } else {
+            let prevAnchor = anchorCount(reference: previousBoard, observed: observed)
+            let startAnchor = anchorCount(reference: .startingPosition, observed: observed)
+            let obsW = observedCount(in: observed, color: .white)
+            let obsB = observedCount(in: observed, color: .black)
+            let prevW = pieceCount(in: previousBoard, color: .white)
+            let prevB = pieceCount(in: previousBoard, color: .black)
+            let canContinueFromPrev = obsW <= prevW && obsB <= prevB && prevAnchor >= startAnchor - 2
+            refBoard = canContinueFromPrev ? previousBoard : .startingPosition
+        }
+
+        var grid: [[ChessPiece?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
+        var whiteKingCandidates: [(row: Int, col: Int, score: Double)] = []
+        var blackKingCandidates: [(row: Int, col: Int, score: Double)] = []
+
+        for r in 0..<8 {
+            for c in 0..<8 {
+                if let obs = observed[r][c] {
+                    if obs.guessedPiece.type == .king || obs.kingLikelihood > 0.45 {
+                        if obs.color == .white {
+                            whiteKingCandidates.append((r, c, obs.kingLikelihood))
                         } else {
-                            blackKingCandidates.append((boardRow, boardCol, result.kingLikelihood))
+                            blackKingCandidates.append((r, c, obs.kingLikelihood))
                         }
                     }
                 }
             }
         }
 
-        // Ensure exactly one white king and one black king if kings were swapped with queen
+        for side in [PieceColor.white, PieceColor.black] {
+            var displacedRefs: [(row: Int, col: Int, type: PieceType)] = []
+            var displacedObs: [CellObservation] = []
+
+            for r in 0..<8 {
+                for c in 0..<8 {
+                    let refPiece = refBoard.squares[r][c]
+                    let obs = observed[r][c]
+                    let refSame = (refPiece?.color == side)
+                    let obsSame = (obs?.color == side)
+
+                    if refSame && obsSame, let rp = refPiece {
+                        grid[r][c] = rp
+                    } else if refSame, let rp = refPiece {
+                        displacedRefs.append((r, c, rp.type))
+                    } else if obsSame, let ob = obs {
+                        displacedObs.append(ob)
+                    }
+                }
+            }
+
+            if !displacedObs.isEmpty {
+                let assigned = assignDisplacedPieces(
+                    refs: displacedRefs,
+                    obs: displacedObs,
+                    side: side
+                )
+                for (obIndex, assignedType) in assigned.enumerated() {
+                    let ob = displacedObs[obIndex]
+                    let finalType: PieceType = (assignedType == .pawn && (ob.boardRow == 0 || ob.boardRow == 7)) ? .queen : assignedType
+                    grid[ob.boardRow][ob.boardCol] = ChessPiece(color: side, type: finalType)
+                }
+            }
+        }
+
         ensureKingPresence(grid: &grid, color: .white, candidates: whiteKingCandidates)
         ensureKingPresence(grid: &grid, color: .black, candidates: blackKingCandidates)
 
-        // Infer reasonable castling rights from current rook/king locations
         var castling = CastlingRights.none
         if grid[7][4] == ChessPiece(color: .white, type: .king) {
             if grid[7][7] == ChessPiece(color: .white, type: .rook) { castling.whiteKingside = true }
@@ -488,12 +634,308 @@ final class ScreenshotBoardRecognizer: Sendable {
             castlingRights: castling,
             enPassantTarget: nil,
             halfMoveClock: 0,
-            fullMoveNumber: 1
+            fullMoveNumber: max(1, refBoard.fullMoveNumber)
         )
+        return (state, "幾何位移追蹤")
+    }
 
-        let avgConf = detectedPieceCount > 0 ? (pieceConfidenceSum / Double(detectedPieceCount)) : 0.65
-        let note = "已辨識 \(detectedPieceCount) 枚棋子（視角：\(perspective.displayName)）"
-        return (state, avgConf, note)
+    private func findLegalDeltaMatch(
+        from baseBoard: ChessBoardState,
+        observed: [[CellObservation?]],
+        highlightSquares: Set<BoardSquare>,
+        preferredSideToMove: PieceColor
+    ) -> (board: ChessBoardState, methodLabel: String)? {
+        if occupancyMatches(baseBoard, observed: observed) {
+            var updated = baseBoard
+            updated.sideToMove = preferredSideToMove
+            return (updated, "0步延續")
+        }
+
+        let seedSides: [PieceColor] = baseBoard.sideToMove == preferredSideToMove.opposite
+            ? [baseBoard.sideToMove, baseBoard.sideToMove.opposite]
+            : [baseBoard.sideToMove.opposite, baseBoard.sideToMove]
+
+        var twoPlyBest: (board: ChessBoardState, score: Int)?
+
+        for seedSide in seedSides {
+            var seedBoard = baseBoard
+            seedBoard.sideToMove = seedSide
+            let moves1 = seedBoard.legalMoves()
+
+            var onePlyBest: (board: ChessBoardState, score: Int)?
+            for m1 in moves1 {
+                let after1 = seedBoard.applying(m1)
+                if occupancyMatches(after1, observed: observed) {
+                    var score = (highlightSquares.contains(m1.from) ? 4 : 0) + (highlightSquares.contains(m1.to) ? 4 : 0)
+                    if m1.promotion == .queen { score += 3 }
+                    if observed[m1.to.row][m1.to.col]?.guessedPiece.type == after1.squares[m1.to.row][m1.to.col]?.type {
+                        score += 1
+                    }
+                    if onePlyBest == nil || score > onePlyBest!.score {
+                        onePlyBest = (after1, score)
+                    }
+                } else if twoPlyBest == nil && occupancyDiffCount(after1, observed: observed) <= 4 {
+                    for m2 in after1.legalMoves() {
+                        let after2 = after1.applying(m2)
+                        if occupancyMatches(after2, observed: observed) {
+                            var score = (highlightSquares.contains(m2.from) ? 4 : 0) + (highlightSquares.contains(m2.to) ? 4 : 0)
+                            if m2.promotion == .queen { score += 3 }
+                            if after2.sideToMove == preferredSideToMove { score += 5 }
+                            if twoPlyBest == nil || score > twoPlyBest!.score {
+                                twoPlyBest = (after2, score)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let best1 = onePlyBest {
+                return (best1.board, "1步著法追蹤")
+            }
+        }
+
+        if let best2 = twoPlyBest {
+            return (best2.board, "2步著法追蹤")
+        }
+        return nil
+    }
+
+    private func occupancyMatches(_ board: ChessBoardState, observed: [[CellObservation?]]) -> Bool {
+        for r in 0..<8 {
+            for c in 0..<8 {
+                if board.squares[r][c]?.color != observed[r][c]?.color {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private func occupancyDiffCount(_ board: ChessBoardState, observed: [[CellObservation?]]) -> Int {
+        var diffs = 0
+        for r in 0..<8 {
+            for c in 0..<8 {
+                if board.squares[r][c]?.color != observed[r][c]?.color {
+                    diffs += 1
+                }
+            }
+        }
+        return diffs
+    }
+
+    private func anchorCount(reference: ChessBoardState, observed: [[CellObservation?]]) -> Int {
+        var count = 0
+        for r in 0..<8 {
+            for c in 0..<8 {
+                if let rp = reference.squares[r][c], let ob = observed[r][c], rp.color == ob.color {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private func pieceCount(in board: ChessBoardState, color: PieceColor) -> Int {
+        var count = 0
+        for r in 0..<8 {
+            for c in 0..<8 where board.squares[r][c]?.color == color {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private func observedCount(in observed: [[CellObservation?]], color: PieceColor) -> Int {
+        var count = 0
+        for r in 0..<8 {
+            for c in 0..<8 where observed[r][c]?.color == color {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private func assignDisplacedPieces(
+        refs: [(row: Int, col: Int, type: PieceType)],
+        obs: [CellObservation],
+        side: PieceColor
+    ) -> [PieceType] {
+        guard !obs.isEmpty else { return [] }
+        guard !refs.isEmpty else { return obs.map(\.guessedPiece.type) }
+
+        var scoreMatrix: [[Double]] = Array(
+            repeating: Array(repeating: -100.0, count: obs.count),
+            count: refs.count
+        )
+        for ri in 0..<refs.count {
+            for oi in 0..<obs.count {
+                scoreMatrix[ri][oi] = displacementAssignmentScore(ref: refs[ri], obs: obs[oi], side: side)
+            }
+        }
+
+        var result = obs.map(\.guessedPiece.type)
+
+        // Exact backtracking when displaced count is small (typical opening/midgame)
+        if refs.count <= 7 && obs.count <= 7 {
+            let targetMatches = min(refs.count, obs.count)
+            var bestScore = -Double.infinity
+            var bestChoice = Array(repeating: -1, count: obs.count) // obsIdx -> refIdx
+            var currentChoice = Array(repeating: -1, count: obs.count)
+            var usedRefs = Array(repeating: false, count: refs.count)
+
+            func dfs(obsIdx: Int, matchedCount: Int, currentScore: Double) {
+                if obsIdx == obs.count {
+                    if matchedCount == targetMatches && currentScore > bestScore {
+                        bestScore = currentScore
+                        bestChoice = currentChoice
+                    }
+                    return
+                }
+                let remainingObs = obs.count - obsIdx
+                if matchedCount + remainingObs - 1 >= targetMatches {
+                    // Allow leaving this obs unmatched only if obs.count > refs.count
+                    currentChoice[obsIdx] = -1
+                    dfs(obsIdx: obsIdx + 1, matchedCount: matchedCount, currentScore: currentScore - 2.0)
+                }
+                for ri in 0..<refs.count where !usedRefs[ri] {
+                    usedRefs[ri] = true
+                    currentChoice[obsIdx] = ri
+                    dfs(obsIdx: obsIdx + 1, matchedCount: matchedCount + 1, currentScore: currentScore + scoreMatrix[ri][obsIdx])
+                    usedRefs[ri] = false
+                }
+            }
+
+            dfs(obsIdx: 0, matchedCount: 0, currentScore: 0.0)
+            for oi in 0..<obs.count {
+                let ri = bestChoice[oi]
+                if ri >= 0 {
+                    result[oi] = refs[ri].type
+                }
+            }
+            return result
+        }
+
+        // Greedy max-score assignment fallback when many pieces moved
+        var pairs: [(ri: Int, oi: Int, score: Double)] = []
+        pairs.reserveCapacity(refs.count * obs.count)
+        for ri in 0..<refs.count {
+            for oi in 0..<obs.count {
+                pairs.append((ri, oi, scoreMatrix[ri][oi]))
+            }
+        }
+        pairs.sort { $0.score > $1.score }
+        var usedR = Set<Int>()
+        var usedO = Set<Int>()
+        for pair in pairs {
+            if usedR.contains(pair.ri) || usedO.contains(pair.oi) { continue }
+            result[pair.oi] = refs[pair.ri].type
+            usedR.insert(pair.ri)
+            usedO.insert(pair.oi)
+        }
+        return result
+    }
+
+    private func displacementAssignmentScore(
+        ref: (row: Int, col: Int, type: PieceType),
+        obs: CellObservation,
+        side: PieceColor
+    ) -> Double {
+        let dr = obs.boardRow - ref.row
+        let dc = obs.boardCol - ref.col
+        let absDr = abs(dr)
+        let absDc = abs(dc)
+        let homeRank = side == .white ? 7 : 0
+        let pawnHomeRank = side == .white ? 6 : 1
+        var score = 0.0
+
+        switch ref.type {
+        case .pawn:
+            let signedDr = side == .white ? -dr : dr
+            if signedDr == 1 && absDc == 0 {
+                score += 12.0
+            } else if ref.row == pawnHomeRank && signedDr == 2 && absDc == 0 {
+                score += 12.0
+            } else if signedDr == 1 && absDc == 1 {
+                score += 9.0
+            } else if signedDr > 0 && signedDr <= 4 && absDc <= 2 {
+                score += 3.0
+            } else {
+                score -= 12.0
+            }
+            if obs.coverage < 0.43 {
+                score += 4.0
+            } else {
+                score -= 3.5
+            }
+
+        case .knight:
+            if (absDr == 2 && absDc == 1) || (absDr == 1 && absDc == 2) {
+                score += 12.0
+            } else if isReachableInTwoKnightHops(fromRow: ref.row, fromCol: ref.col, toRow: obs.boardRow, toCol: obs.boardCol) {
+                score += 6.5
+            } else {
+                score += 1.0
+            }
+
+        case .bishop:
+            let sameParity = ((ref.row + ref.col) % 2) == ((obs.boardRow + obs.boardCol) % 2)
+            if !sameParity {
+                score -= 20.0
+            } else if absDr == absDc {
+                score += 12.0
+            } else {
+                score += 6.0
+            }
+
+        case .rook:
+            if dr == 0 || dc == 0 {
+                score += 11.0
+            } else {
+                score += 5.0
+            }
+            if obs.coverage > 0.60 { score += 1.5 }
+
+        case .queen:
+            if dr == 0 || dc == 0 || absDr == absDc {
+                score += 9.5
+            } else {
+                score += 5.5
+            }
+            if obs.coverage < 0.43 { score -= 2.5 }
+            if obs.coverage > 0.60 { score += 2.5 }
+
+        case .king:
+            if max(absDr, absDc) <= 1 {
+                score += 10.0
+            } else if ref.row == homeRank && ref.col == 4 && obs.boardRow == homeRank && (obs.boardCol == 2 || obs.boardCol == 6) {
+                score += 13.0
+            } else if max(absDr, absDc) > 2 {
+                score -= 4.0
+            }
+            if obs.coverage < 0.43 { score -= 2.5 }
+            if obs.coverage > 0.60 { score += 4.5 }
+            score += obs.kingLikelihood * 2.5
+        }
+
+        if obs.guessedPiece.type == ref.type {
+            score += 1.8
+        }
+        return score
+    }
+
+    private func isReachableInTwoKnightHops(fromRow: Int, fromCol: Int, toRow: Int, toCol: Int) -> Bool {
+        let offsets = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+        for (dr1, dc1) in offsets {
+            let mr = fromRow + dr1
+            let mc = fromCol + dc1
+            guard (0..<8).contains(mr), (0..<8).contains(mc) else { continue }
+            let dr2 = abs(toRow - mr)
+            let dc2 = abs(toCol - mc)
+            if (dr2 == 2 && dc2 == 1) || (dr2 == 1 && dc2 == 2) {
+                return true
+            }
+        }
+        return false
     }
 
     private func ensureKingPresence(
@@ -523,12 +965,12 @@ final class ScreenshotBoardRecognizer: Sendable {
     ) -> RGBColor {
         let baseX = col * cellSize
         let baseY = row * cellSize
-        // Sample 4 outer corners of the cell (pixels 3..6 from edges, avoiding coordinate glyphs & piece center)
+        // Sample upper corners (avoids bottom coordinates a-h, top-left rank digits 1-8, and wide custom piece bases)
         let offsets = [
-            (cellSize - 6, 4),
-            (cellSize - 5, 5),
-            (cellSize - 6, cellSize - 5),
-            (4, cellSize - 5)
+            (cellSize - 6, 10),
+            (cellSize - 7, 12),
+            (6, 14),
+            (7, 16)
         ]
         var rs: [Double] = [], gs: [Double] = [], bs: [Double] = []
         for (ox, oy) in offsets {
@@ -549,7 +991,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         screenCol: Int,
         cellSize: Int,
         bg: RGBColor
-    ) -> (piece: ChessPiece, confidence: Double, kingLikelihood: Double)? {
+    ) -> (piece: ChessPiece, confidence: Double, kingLikelihood: Double, coverage: Double)? {
         let baseX = screenCol * cellSize
         let baseY = screenRow * cellSize
         let pad = 5 // analyze inner 40x40 of the 50x50 square
@@ -557,7 +999,8 @@ final class ScreenshotBoardRecognizer: Sendable {
         let distThreshold = 34.0
 
         var mask = Array(repeating: Array(repeating: false, count: innerSize), count: innerSize)
-        var fgLums: [Double] = []
+        var fgRMinusBSum = 0.0
+        var fgLumSum = 0.0
         var fgCount = 0
         var minX = innerSize, maxX = -1
         var minY = innerSize, maxY = -1
@@ -571,7 +1014,9 @@ final class ScreenshotBoardRecognizer: Sendable {
                 if pixel.distance(to: bg) > distThreshold {
                     mask[y][x] = true
                     fgCount += 1
-                    fgLums.append(pixel.luminance)
+                    let lum = pixel.luminance
+                    fgRMinusBSum += (pixel.r - pixel.b)
+                    fgLumSum += lum
                     if x < minX { minX = x }
                     if x > maxX { maxX = x }
                     if y < minY { minY = y }
@@ -586,21 +1031,10 @@ final class ScreenshotBoardRecognizer: Sendable {
             return nil
         }
 
-        // Determine Piece Color (White vs Black) using upper-quartile & median luminance
-        let sortedLums = fgLums.sorted()
-        let p75Lum = sortedLums[min(sortedLums.count - 1, Int(Double(sortedLums.count) * 0.72))]
-        let p50Lum = sortedLums[sortedLums.count / 2]
-        let brightRatio = Double(sortedLums.filter { $0 > 180.0 }.count) / Double(sortedLums.count)
-        let darkRatio = Double(sortedLums.filter { $0 < 95.0 }.count) / Double(sortedLums.count)
-
-        let pieceColor: PieceColor
-        if p75Lum > 175.0 && (brightRatio > 0.25 || p50Lum > 150.0) {
-            pieceColor = .white
-        } else if darkRatio > 0.35 || p50Lum < 120.0 {
-            pieceColor = .black
-        } else {
-            pieceColor = p75Lum > 165.0 ? .white : .black
-        }
+        // Determine Piece Color (White vs Black) supporting both standard and custom tinted skins (e.g. pink vs dark blue-purple)
+        let avgRMinusB = fgCount > 0 ? fgRMinusBSum / Double(fgCount) : 0.0
+        let avgLum = fgCount > 0 ? fgLumSum / Double(fgCount) : 0.0
+        let pieceColor: PieceColor = (avgRMinusB > 5.0 || avgLum > 145.0) ? .white : .black
 
         // Extract geometric silhouette features inside bounding box
         let boxW = max(1, maxX - minX + 1)
@@ -694,7 +1128,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         let bestType = scores.max(by: { $0.value < $1.value })?.key ?? .pawn
         let kingLike = (scores[.king] ?? 0) / 8.0
 
-        return (ChessPiece(color: pieceColor, type: bestType), 0.78, kingLike)
+        return (ChessPiece(color: pieceColor, type: bestType), 0.78, kingLike, coverage)
     }
 
     // MARK: - Helpers

@@ -3,6 +3,7 @@ import SwiftUI
 struct PiPPreviewCardView: View {
     @ObservedObject var pipManager: PiPOverlayManager
     let isAutoSyncEnabled: Bool
+    let onTogglePiP: () -> Void
     let onToggleAutoSync: () -> Void
 
     var body: some View {
@@ -41,7 +42,7 @@ struct PiPPreviewCardView: View {
 
                 HStack(spacing: 8) {
                     Button {
-                        pipManager.togglePiP()
+                        onTogglePiP()
                     } label: {
                         Label(
                             pipManager.isPiPActive ? "關閉懸浮窗" : "啟動懸浮窗",

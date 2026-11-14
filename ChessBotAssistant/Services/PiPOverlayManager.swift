@@ -16,6 +16,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     let displayLayer = AVSampleBufferDisplayLayer()
     private var pipController: AVPictureInPictureController?
     private var refreshTimer: Timer?
+    private var silentAudioPlayer: AVAudioPlayer?
     private var startTime = CACurrentMediaTime()
 
     private var latestBoard: ChessBoardState = .startingPosition
@@ -82,6 +83,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         }
 
         configureAudioSession()
+        startSilentAudioKeepAlive()
         pushCurrentFrame()
         startFrameHeartbeat()
 
@@ -96,6 +98,63 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     func startPiPIfNeeded() {
         guard let pipController, !pipController.isPictureInPictureActive else { return }
         togglePiP()
+    }
+
+    func startSilentAudioKeepAlive() {
+        configureAudioSession()
+        if let player = silentAudioPlayer, player.isPlaying {
+            return
+        }
+        guard let wavData = Self.makeSilentWAVData(durationSeconds: 1.0, sampleRate: 8000) else {
+            return
+        }
+        do {
+            let player = try AVAudioPlayer(data: wavData, fileTypeHint: AVFileType.wav.rawValue)
+            player.numberOfLoops = -1
+            player.volume = 0.01
+            player.prepareToPlay()
+            player.play()
+            silentAudioPlayer = player
+        } catch {
+            statusMessage = "背景保活音訊啟動失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func stopSilentAudioKeepAlive() {
+        silentAudioPlayer?.stop()
+        silentAudioPlayer = nil
+    }
+
+    private static func makeSilentWAVData(durationSeconds: Double, sampleRate: UInt32) -> Data? {
+        let numChannels: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let frameCount = UInt32(max(1.0, Double(sampleRate) * durationSeconds))
+        let dataSize = frameCount * UInt32(numChannels) * UInt32(bitsPerSample / 8)
+        let byteRate = sampleRate * UInt32(numChannels) * UInt32(bitsPerSample / 8)
+        let blockAlign = numChannels * (bitsPerSample / 8)
+        let riffSize = UInt32(36) + dataSize
+
+        var data = Data(capacity: Int(44 + dataSize))
+        func appendLE<T: FixedWidthInteger>(_ value: T) {
+            var le = value.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+
+        data.append(contentsOf: [0x52, 0x49, 0x46, 0x46]) // "RIFF"
+        appendLE(riffSize)
+        data.append(contentsOf: [0x57, 0x41, 0x56, 0x45]) // "WAVE"
+        data.append(contentsOf: [0x66, 0x6D, 0x74, 0x20]) // "fmt "
+        appendLE(UInt32(16)) // PCM chunk size
+        appendLE(UInt16(1))  // PCM format
+        appendLE(numChannels)
+        appendLE(sampleRate)
+        appendLE(byteRate)
+        appendLE(blockAlign)
+        appendLE(bitsPerSample)
+        data.append(contentsOf: [0x64, 0x61, 0x74, 0x61]) // "data"
+        appendLE(dataSize)
+        data.append(Data(count: Int(dataSize)))
+        return data
     }
 
     private func configureAudioSession() {
@@ -162,6 +221,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             self.isPiPActive = false
             self.statusMessage = "子母畫面已關閉"
             self.stopFrameHeartbeatIfIdle()
+            if !self.latestAutoSyncActive {
+                self.stopSilentAudioKeepAlive()
+            }
         }
     }
 
@@ -241,8 +303,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             UIColor(red: 0.08, green: 0.10, blue: 0.13, alpha: 1.0).setFill()
             cg.fill(CGRect(origin: .zero, size: canvasSize))
 
-            // 1. Eval bar on far left (18 x 440)
-            let evalRect = CGRect(x: 16, y: 20, width: 18, height: 440)
+            // 1. Eval bar on far left with PiP safe margin (16 x 420)
+            let evalRect = CGRect(x: 24, y: 30, width: 16, height: 420)
             let whiteFrac = CGFloat(latestAnalysis?.evalBarFractionWhite ?? 0.5)
             UIColor(white: 0.15, alpha: 1.0).setFill()
             cg.fill(evalRect)
@@ -260,9 +322,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             cg.setLineWidth(1.5)
             cg.stroke(evalRect)
 
-            // 2. Mini 8x8 Board (440 x 440)
-            let boardOrigin = CGPoint(x: 44, y: 20)
-            let boardSize: CGFloat = 440
+            // 2. Mini 8x8 Board with PiP corner-safe margins (420 x 420)
+            let boardOrigin = CGPoint(x: 48, y: 30)
+            let boardSize: CGFloat = 420
             let cellSize = boardSize / 8.0
 
             let lightSquareColor = UIColor(red: 0.92, green: 0.93, blue: 0.82, alpha: 1.0)
@@ -325,12 +387,12 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                 }
             }
 
-            // 4. Right Info Panel (x: 500..704)
-            let panelX: CGFloat = 500
-            let panelW: CGFloat = 204
+            // 4. Right Info Panel (x: 484..696)
+            let panelX: CGFloat = 484
+            let panelW: CGFloat = 212
 
             if latestIsSafetyLocked {
-                let warnBox = CGRect(x: panelX, y: 20, width: panelW, height: 390)
+                let warnBox = CGRect(x: panelX, y: 30, width: panelW, height: 390)
                 UIColor(red: 0.28, green: 0.10, blue: 0.11, alpha: 1.0).setFill()
                 UIBezierPath(roundedRect: warnBox, cornerRadius: 12).fill()
                 UIColor(red: 0.95, green: 0.35, blue: 0.35, alpha: 0.9).setStroke()
@@ -342,19 +404,19 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                     .font: UIFont.systemFont(ofSize: 18, weight: .heavy),
                     .foregroundColor: UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
                 ]
-                NSString(string: "⚠️ 疑似真人計時賽").draw(in: CGRect(x: panelX + 12, y: 46, width: panelW - 24, height: 32), withAttributes: titleAttr)
+                NSString(string: "⚠️ 疑似真人計時賽").draw(in: CGRect(x: panelX + 12, y: 52, width: panelW - 24, height: 32), withAttributes: titleAttr)
 
                 let bodyAttr: [NSAttributedString.Key: Any] = [
                     .font: UIFont.systemFont(ofSize: 14, weight: .semibold),
                     .foregroundColor: UIColor.white
                 ]
                 NSString(string: "已自動鎖定提示防誤封\n\n偵測到倒數計時器且無 Bot 標記。\n\n若確定為電腦練習，請回主視窗點擊「確認為 Bot 對局並解鎖」。").draw(
-                    in: CGRect(x: panelX + 12, y: 92, width: panelW - 24, height: 280),
+                    in: CGRect(x: panelX + 12, y: 96, width: panelW - 24, height: 280),
                     withAttributes: bodyAttr
                 )
             } else {
                 // Header badge
-                let badgeRect = CGRect(x: panelX, y: 20, width: panelW, height: 34)
+                let badgeRect = CGRect(x: panelX, y: 30, width: panelW, height: 32)
                 UIColor(red: 0.16, green: 0.22, blue: 0.28, alpha: 1.0).setFill()
                 UIBezierPath(roundedRect: badgeRect, cornerRadius: 8).fill()
 
@@ -365,32 +427,32 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                 let depthText = latestAnalysis.map { "D\($0.depthReached)" } ?? "..."
                 let modeBadge = latestCoachPieceOnlyMode ? "教練模式" : "BOT 輔助"
                 NSString(string: "\(modeBadge) • \(depthText)").draw(
-                    in: badgeRect.insetBy(dx: 10, dy: 7),
+                    in: badgeRect.insetBy(dx: 10, dy: 6),
                     withAttributes: headerAttr
                 )
 
                 // Side to move & primary eval
                 let turnText = "輪到 \(latestBoard.sideToMove.displayName)"
                 let turnAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 15, weight: .semibold),
+                    .font: UIFont.systemFont(ofSize: 14.5, weight: .semibold),
                     .foregroundColor: UIColor(white: 0.85, alpha: 1.0)
                 ]
-                NSString(string: turnText).draw(at: CGPoint(x: panelX, y: 66), withAttributes: turnAttr)
+                NSString(string: turnText).draw(at: CGPoint(x: panelX, y: 72), withAttributes: turnAttr)
 
                 let primary = latestAnalysis?.primaryLine
                 let evalStr = primary?.formattedScore ?? "0.00"
                 let winPct = Int((primary?.winProbability(for: latestPerspective) ?? 50.0).rounded())
                 let evalAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.monospacedDigitSystemFont(ofSize: 28, weight: .heavy),
+                    .font: UIFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy),
                     .foregroundColor: UIColor.white
                 ]
-                NSString(string: evalStr).draw(at: CGPoint(x: panelX, y: 92), withAttributes: evalAttr)
+                NSString(string: evalStr).draw(at: CGPoint(x: panelX, y: 94), withAttributes: evalAttr)
 
                 let winAttr: [NSAttributedString.Key: Any] = [
                     .font: UIFont.systemFont(ofSize: 13, weight: .medium),
                     .foregroundColor: UIColor(white: 0.72, alpha: 1.0)
                 ]
-                NSString(string: "我方勝率 \(winPct)%").draw(at: CGPoint(x: panelX, y: 126), withAttributes: winAttr)
+                NSString(string: "我方勝率 \(winPct)%").draw(at: CGPoint(x: panelX, y: 128), withAttributes: winAttr)
 
                 // Top 3 PV Cards
                 let cardColors: [UIColor] = [
@@ -401,58 +463,58 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
 
                 let lines = Array((latestAnalysis?.lines ?? []).prefix(3))
                 for (idx, line) in lines.enumerated() {
-                    let cardY = 160 + CGFloat(idx) * 84
-                    let cardRect = CGRect(x: panelX, y: cardY, width: panelW, height: 74)
+                    let cardY = 162 + CGFloat(idx) * 80
+                    let cardRect = CGRect(x: panelX, y: cardY, width: panelW, height: 72)
                     UIColor(red: 0.13, green: 0.17, blue: 0.22, alpha: 1.0).setFill()
                     UIBezierPath(roundedRect: cardRect, cornerRadius: 10).fill()
 
                     cardColors[idx].withAlphaComponent(0.9).setFill()
-                    UIBezierPath(roundedRect: CGRect(x: panelX, y: cardY, width: 6, height: 74), cornerRadius: 3).fill()
+                    UIBezierPath(roundedRect: CGRect(x: panelX, y: cardY, width: 6, height: 72), cornerRadius: 3).fill()
 
                     let rankAttr: [NSAttributedString.Key: Any] = [
-                        .font: UIFont.systemFont(ofSize: 13, weight: .bold),
+                        .font: UIFont.systemFont(ofSize: 12.5, weight: .bold),
                         .foregroundColor: cardColors[idx]
                     ]
                     NSString(string: "#\(idx + 1) \(line.formattedScore)").draw(
-                        at: CGPoint(x: panelX + 14, y: cardY + 8),
+                        at: CGPoint(x: panelX + 14, y: cardY + 7),
                         withAttributes: rankAttr
                     )
 
                     if latestCoachPieceOnlyMode {
                         let pieceName = latestBoard.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
                         let hintAttr: [NSAttributedString.Key: Any] = [
-                            .font: UIFont.systemFont(ofSize: 16, weight: .heavy),
+                            .font: UIFont.systemFont(ofSize: 15.5, weight: .heavy),
                             .foregroundColor: UIColor.white
                         ]
                         NSString(string: "建議動 \(pieceName)").draw(
-                            at: CGPoint(x: panelX + 14, y: cardY + 27),
+                            at: CGPoint(x: panelX + 14, y: cardY + 25),
                             withAttributes: hintAttr
                         )
 
                         let coordAttr: [NSAttributedString.Key: Any] = [
-                            .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .medium),
+                            .font: UIFont.monospacedSystemFont(ofSize: 12.5, weight: .medium),
                             .foregroundColor: UIColor(white: 0.78, alpha: 1.0)
                         ]
                         NSString(string: "提示起點: \(line.bestMove.from.algebraic)").draw(
-                            at: CGPoint(x: panelX + 14, y: cardY + 51),
+                            at: CGPoint(x: panelX + 14, y: cardY + 48),
                             withAttributes: coordAttr
                         )
                     } else {
                         let sanAttr: [NSAttributedString.Key: Any] = [
-                            .font: UIFont.monospacedSystemFont(ofSize: 20, weight: .heavy),
+                            .font: UIFont.monospacedSystemFont(ofSize: 19, weight: .heavy),
                             .foregroundColor: UIColor.white
                         ]
                         NSString(string: line.bestMove.san).draw(
-                            at: CGPoint(x: panelX + 14, y: cardY + 26),
+                            at: CGPoint(x: panelX + 14, y: cardY + 24),
                             withAttributes: sanAttr
                         )
 
                         let coordAttr: [NSAttributedString.Key: Any] = [
-                            .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .medium),
+                            .font: UIFont.monospacedSystemFont(ofSize: 12.5, weight: .medium),
                             .foregroundColor: UIColor(white: 0.76, alpha: 1.0)
                         ]
                         NSString(string: line.bestMove.coordinateDisplay).draw(
-                            at: CGPoint(x: panelX + 14, y: cardY + 51),
+                            at: CGPoint(x: panelX + 14, y: cardY + 48),
                             withAttributes: coordAttr
                         )
                     }
@@ -471,7 +533,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                         ? UIColor(red: 0.45, green: 0.90, blue: 0.58, alpha: 1.0)
                         : UIColor(white: 0.65, alpha: 1.0))
             ]
-            NSString(string: footerText).draw(at: CGPoint(x: panelX, y: 440), withAttributes: footerAttr)
+            NSString(string: footerText).draw(at: CGPoint(x: panelX, y: 432), withAttributes: footerAttr)
         }
     }
 

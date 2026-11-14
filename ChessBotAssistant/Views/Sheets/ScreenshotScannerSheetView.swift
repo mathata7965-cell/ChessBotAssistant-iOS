@@ -180,7 +180,7 @@ struct ScreenshotScannerSheetView: View {
                 if let last = viewModel.lastScanResult {
                     previewBoard = last.boardState
                     detectedPerspective = last.detectedPerspective
-                    selectedTurn = last.detectedPerspective
+                    selectedTurn = last.boardState.sideToMove
                     scanNotes = last.notes
                     if let png = last.croppedBoardPNGData {
                         croppedPreviewImage = UIImage(data: png)
@@ -204,11 +204,13 @@ struct ScreenshotScannerSheetView: View {
     private func runRecognition(on image: UIImage) async {
         isProcessing = true
         let fallback = viewModel.perspective
+        let prevBoard = viewModel.boardState
         let result = await Task.detached(priority: .userInitiated) {
             await ScreenshotBoardRecognizer.shared.recognizeBoard(
                 from: image,
                 fallbackPerspective: fallback,
-                sideToMove: nil
+                sideToMove: nil,
+                previousBoard: prevBoard
             )
         }.value
 
@@ -220,7 +222,7 @@ struct ScreenshotScannerSheetView: View {
         latestRecognizedResult = result
         previewBoard = result.boardState
         detectedPerspective = result.detectedPerspective
-        selectedTurn = result.detectedPerspective
+        selectedTurn = result.boardState.sideToMove
         scanNotes = result.notes
         if let png = result.croppedBoardPNGData {
             croppedPreviewImage = UIImage(data: png)
