@@ -7,6 +7,11 @@ final class ChessEngineService: ObservableObject {
     @Published var autoHintEnabled: Bool = true
     @Published var useCloudStockfish: Bool = true
 
+    // 防誤封與隱私隔離保護設定
+    @Published var zeroNetworkIsolationMode: Bool = true
+    @Published var humanMatchSafetyLockEnabled: Bool = true
+    @Published var coachPieceOnlyHintMode: Bool = false
+
     @Published private(set) var isAnalyzing: Bool = false
     @Published private(set) var currentAnalysis: EngineAnalysisResult?
     @Published private(set) var lastErrorMessage: String?
@@ -48,7 +53,8 @@ final class ChessEngineService: ObservableObject {
 
         let requestedDepth = max(4, min(18, targetDepth))
         let requestedPV = max(1, min(3, multiPVCount))
-        let allowCloud = useCloudStockfish
+        let isZeroNetwork = zeroNetworkIsolationMode
+        let allowCloud = useCloudStockfish && !isZeroNetwork
         let cacheKey = "\(board.positionKey)|d\(requestedDepth)|pv\(requestedPV)"
 
         if allowCloud, let cached = cloudCache[cacheKey] {
@@ -62,20 +68,24 @@ final class ChessEngineService: ObservableObject {
         activeTask = Task { [weak self] in
             guard let self else { return }
 
-            // 1. Run local fast Multi-PV engine off the main thread for instant response
+            // 1. Run local fast Multi-PV engine off the main thread
+            let localMaxDepth = isZeroNetwork ? min(requestedDepth, 6) : min(requestedDepth, 5)
+            let localBudget: TimeInterval = isZeroNetwork ? 1.1 : 0.9
+
             let localResult = await Task.detached(priority: .userInitiated) {
                 LocalAlphaBetaEngine.analyze(
                     board: board,
-                    maxDepth: min(requestedDepth, 5),
+                    maxDepth: localMaxDepth,
                     multiPV: requestedPV,
-                    timeBudgetSeconds: 0.9
+                    timeBudgetSeconds: localBudget,
+                    isZeroNetworkMode: isZeroNetwork
                 )
             }.value
 
             if Task.isCancelled { return }
             self.currentAnalysis = localResult
 
-            // 2. If Cloud Stockfish is disabled, finish here
+            // 2. If Cloud Stockfish is disabled or Zero-Network Isolation is active, finish strictly offline
             guard allowCloud else {
                 self.isAnalyzing = false
                 return
@@ -416,7 +426,8 @@ private enum LocalAlphaBetaEngine {
         board: ChessBoardState,
         maxDepth: Int,
         multiPV: Int,
-        timeBudgetSeconds: TimeInterval
+        timeBudgetSeconds: TimeInterval,
+        isZeroNetworkMode: Bool = false
     ) -> EngineAnalysisResult {
         let rootMoves = board.legalMoves()
         let fen = board.toFEN()
@@ -518,7 +529,9 @@ private enum LocalAlphaBetaEngine {
             lines: pvLines,
             depthReached: completedDepth,
             isCloudVerified: false,
-            engineSource: "本地離線引擎 (D\(completedDepth))",
+            engineSource: isZeroNetworkMode
+                ? "🔒 本機零連網安全引擎 (D\(completedDepth))"
+                : "本地離線引擎 (D\(completedDepth))",
             nodesSearched: ctx.nodes,
             timestamp: Date()
         )

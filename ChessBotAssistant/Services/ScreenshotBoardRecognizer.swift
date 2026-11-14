@@ -9,6 +9,9 @@ struct RecognizedBoardResult: Sendable {
     let detectedPerspective: PieceColor
     let confidence: Double
     let notes: String
+    let isLikelyHumanTimedGame: Bool
+    let isConfirmedBotMatch: Bool
+    let detectedMatchContextNote: String
 }
 
 final class ScreenshotBoardRecognizer: Sendable {
@@ -45,7 +48,13 @@ final class ScreenshotBoardRecognizer: Sendable {
             fallback: fallbackPerspective
         )
 
-        // 3. Classify 64 cells
+        // 3. Analyze surrounding header/footer for Fair-Play human timed match detection
+        let matchContext = await analyzeMatchContext(
+            fullCGImage: uprightCG,
+            boardPixelRect: clampedRect
+        )
+
+        // 4. Classify 64 cells
         let classification = classify64Squares(
             boardCGImage: croppedBoard,
             perspective: detectedPerspective,
@@ -68,7 +77,10 @@ final class ScreenshotBoardRecognizer: Sendable {
             boardRectNormalized: normalizedRect,
             detectedPerspective: detectedPerspective,
             confidence: classification.confidence,
-            notes: classification.notes
+            notes: classification.notes,
+            isLikelyHumanTimedGame: matchContext.isHumanTimed,
+            isConfirmedBotMatch: matchContext.isBot,
+            detectedMatchContextNote: matchContext.note
         )
     }
 
@@ -294,6 +306,70 @@ final class ScreenshotBoardRecognizer: Sendable {
                 try handler.perform([request])
             } catch {
                 continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    // MARK: - Fair-Play Match Context Detection (Bot vs Human Timed Match)
+
+    private func analyzeMatchContext(
+        fullCGImage: CGImage,
+        boardPixelRect: CGRect
+    ) async -> (isHumanTimed: Bool, isBot: Bool, note: String) {
+        let imgW = CGFloat(fullCGImage.width)
+        let imgH = CGFloat(fullCGImage.height)
+
+        // Exclude top ~6.5% iOS status bar so phone system clock doesn't trigger false positives
+        let topStripMinY = min(boardPixelRect.minY, imgH * 0.065)
+        let topStripHeight = max(0, boardPixelRect.minY - topStripMinY)
+        let topRect = CGRect(x: 0, y: topStripMinY, width: imgW, height: topStripHeight)
+
+        let bottomStripMaxY = min(imgH, boardPixelRect.maxY + imgH * 0.16)
+        let bottomStripHeight = max(0, bottomStripMaxY - boardPixelRect.maxY)
+        let bottomRect = CGRect(x: 0, y: boardPixelRect.maxY, width: imgW, height: bottomStripHeight)
+
+        var texts: [String] = []
+        if topRect.height >= 24, let topCrop = fullCGImage.cropping(to: topRect) {
+            texts.append(await recognizeAllText(in: topCrop))
+        }
+        if bottomRect.height >= 24, let bottomCrop = fullCGImage.cropping(to: bottomRect) {
+            texts.append(await recognizeAllText(in: bottomCrop))
+        }
+
+        let combined = texts.joined(separator: " ")
+        let lower = combined.lowercased()
+
+        let botKeywords = ["bot", "computer", "coach", "電腦", "機器人", "練習", "挑戰", "adaptive"]
+        let hasBotIndicator = botKeywords.contains { lower.contains($0) }
+
+        let hasCountdownClock = combined.range(of: #"\b\d{1,2}:\d{2}\b"#, options: .regularExpression) != nil
+
+        if hasBotIndicator {
+            return (false, true, "已確認為電腦/Bot 練習對局")
+        }
+        if hasCountdownClock {
+            return (true, false, "偵測到倒數計時器且無 Bot 標記，疑似真人計時賽，已自動鎖定提示")
+        }
+        return (false, false, "未偵測到計時器，維持安全輔助模式")
+    }
+
+    private func recognizeAllText(in cgImage: CGImage) async -> String {
+        await withCheckedContinuation { continuation in
+            let request = VNRecognizeTextRequest { req, _ in
+                let observations = req.results as? [VNRecognizedTextObservation] ?? []
+                let joined = observations
+                    .compactMap { $0.topCandidates(1).first?.string }
+                    .joined(separator: " ")
+                continuation.resume(returning: joined)
+            }
+            request.recognitionLevel = .fast
+            request.usesLanguageCorrection = false
+            request.recognitionLanguages = ["zh-Hant", "en-US"]
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(returning: "")
             }
         }
     }

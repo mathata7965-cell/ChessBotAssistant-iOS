@@ -23,6 +23,82 @@ struct MainAssistantView: View {
                             }
                         )
 
+                        // 防誤封與隱私保護狀態列
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 7) {
+                                protectionPill(
+                                    title: viewModel.engineService.zeroNetworkIsolationMode ? "🔒 零連網隔離:開" : "🌐 雲端連線:開",
+                                    isActive: viewModel.engineService.zeroNetworkIsolationMode,
+                                    activeColor: accentGreen
+                                ) {
+                                    viewModel.engineService.zeroNetworkIsolationMode.toggle()
+                                    viewModel.triggerAnalysis()
+                                }
+
+                                protectionPill(
+                                    title: viewModel.engineService.humanMatchSafetyLockEnabled ? "🛡️ 真人局防誤觸:開" : "⚠️ 真人局鎖:關",
+                                    isActive: viewModel.engineService.humanMatchSafetyLockEnabled,
+                                    activeColor: .cyan
+                                ) {
+                                    viewModel.engineService.humanMatchSafetyLockEnabled.toggle()
+                                }
+
+                                protectionPill(
+                                    title: viewModel.engineService.coachPieceOnlyHintMode ? "🎓 教練半提示:開" : "🎓 教練半提示:關",
+                                    isActive: viewModel.engineService.coachPieceOnlyHintMode,
+                                    activeColor: .orange
+                                ) {
+                                    viewModel.engineService.coachPieceOnlyHintMode.toggle()
+                                }
+
+                                if viewModel.screenshotMonitor.hasDeletableScreenshot {
+                                    protectionPill(
+                                        title: "🧹 刪暫存截圖",
+                                        isActive: true,
+                                        activeColor: .pink
+                                    ) {
+                                        viewModel.deleteLastScreenshot()
+                                    }
+                                }
+                            }
+                        }
+
+                        // 真人計時賽自動鎖定警告卡片
+                        if viewModel.isFairPlaySafetyLocked {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "exclamationmark.shield.fill")
+                                        .font(.title3)
+                                        .foregroundColor(.red)
+                                    Text("已觸發防誤封自動鎖定")
+                                        .font(.subheadline.bold())
+                                        .foregroundColor(.white)
+                                    Spacer()
+                                }
+                                Text(viewModel.safetyLockReason ?? "偵測到倒數計時器且無 Bot 標記，已隱藏所有提示避免誤用於真人對局。")
+                                    .font(.caption)
+                                    .foregroundColor(Color(white: 0.85))
+                                Button {
+                                    viewModel.unlockSafetyLockForBotMatch()
+                                } label: {
+                                    Text("確認為 Bot 對局並解鎖")
+                                        .font(.caption.bold())
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(Color.red.opacity(0.30))
+                                        .foregroundColor(.white)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                            }
+                            .padding(12)
+                            .background(Color.red.opacity(0.16))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.red.opacity(0.60), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+
                         // Optional toast banner
                         if let banner = viewModel.statusBanner {
                             HStack(spacing: 8) {
@@ -57,6 +133,8 @@ struct MainAssistantView: View {
                                 pvLines: viewModel.engineService.currentAnalysis?.lines ?? [],
                                 showAutoHintArrows: viewModel.engineService.autoHintEnabled,
                                 highlightedPVIndex: highlightedPVIndex,
+                                coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
+                                isSafetyLocked: viewModel.isFairPlaySafetyLocked,
                                 onTapSquare: { square in
                                     viewModel.tapSquare(square)
                                 }
@@ -141,6 +219,9 @@ struct MainAssistantView: View {
                             perspective: viewModel.perspective,
                             isAnalyzing: viewModel.engineService.isAnalyzing,
                             selectedPVIndex: highlightedPVIndex,
+                            boardState: viewModel.boardState,
+                            coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
+                            isSafetyLocked: viewModel.isFairPlaySafetyLocked,
                             onSelectPV: { line in
                                 highlightedPVIndex = line.multipvIndex
                             },
@@ -306,6 +387,27 @@ struct MainAssistantView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private func protectionPill(
+        title: String,
+        isActive: Bool,
+        activeColor: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(isActive ? activeColor.opacity(0.18) : Color.white.opacity(0.07))
+                .foregroundColor(isActive ? activeColor : Color(white: 0.70))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(isActive ? activeColor.opacity(0.55) : Color.white.opacity(0.10), lineWidth: 1)
+                )
+        }
     }
 
     private func actionChip(

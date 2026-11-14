@@ -12,6 +12,7 @@ struct ScreenshotScannerSheetView: View {
     @State private var selectedTurn: PieceColor = .white
     @State private var scanNotes: String = "請選擇或讀取 Chess.com 對局截圖"
     @State private var isProcessing = false
+    @State private var latestRecognizedResult: RecognizedBoardResult?
 
     var body: some View {
         NavigationStack {
@@ -98,12 +99,23 @@ struct ScreenshotScannerSheetView: View {
                                 Button {
                                     var updated = board
                                     updated.sideToMove = selectedTurn
+                                    viewModel.history.append(viewModel.boardState)
                                     viewModel.boardState = updated
                                     viewModel.perspective = detectedPerspective
-                                    viewModel.history.append(board)
+                                    if let rec = latestRecognizedResult,
+                                       viewModel.engineService.humanMatchSafetyLockEnabled,
+                                       rec.isLikelyHumanTimedGame,
+                                       !rec.isConfirmedBotMatch {
+                                        viewModel.isFairPlaySafetyLocked = true
+                                        viewModel.safetyLockReason = rec.detectedMatchContextNote
+                                        viewModel.showBanner("⚠️ \(rec.detectedMatchContextNote)")
+                                    } else {
+                                        viewModel.isFairPlaySafetyLocked = false
+                                        viewModel.safetyLockReason = nil
+                                        viewModel.showBanner("已套用截圖棋盤並開始分析")
+                                    }
                                     viewModel.clearSelection()
                                     viewModel.triggerAnalysis()
-                                    viewModel.showBanner("已套用截圖棋盤並開始分析")
                                     dismiss()
                                 } label: {
                                     Text("套用到主分析棋盤")
@@ -205,6 +217,7 @@ struct ScreenshotScannerSheetView: View {
             scanNotes = "未能識別圖片中的棋盤，請確認包含完整的 8×8 棋盤"
             return
         }
+        latestRecognizedResult = result
         previewBoard = result.boardState
         detectedPerspective = result.detectedPerspective
         selectedTurn = result.detectedPerspective

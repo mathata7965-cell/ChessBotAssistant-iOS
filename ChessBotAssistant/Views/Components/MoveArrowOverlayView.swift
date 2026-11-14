@@ -5,6 +5,8 @@ struct MoveArrowOverlayView: View {
     let perspective: PieceColor
     let showArrows: Bool
     let highlightedPVIndex: Int?
+    var coachPieceOnlyMode: Bool = false
+    var isSafetyLocked: Bool = false
 
     private func arrowColor(for rank: Int) -> Color {
         switch rank {
@@ -16,7 +18,7 @@ struct MoveArrowOverlayView: View {
 
     var body: some View {
         GeometryReader { geo in
-            if showArrows && !pvLines.isEmpty {
+            if showArrows && !isSafetyLocked && !coachPieceOnlyMode && !pvLines.isEmpty {
                 let size = min(geo.size.width, geo.size.height)
                 let cell = size / 8.0
 

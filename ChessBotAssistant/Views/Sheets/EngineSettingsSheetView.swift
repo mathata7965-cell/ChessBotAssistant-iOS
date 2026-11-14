@@ -13,6 +13,32 @@ struct EngineSettingsSheetView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("🛡️ 防誤封與隱私安全防護") {
+                    Toggle("🔒 100% 純本機零連網隔離模式", isOn: $engineService.zeroNetworkIsolationMode)
+                        .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
+
+                    Text("開啟時所有分析皆於本機完成，不發送任何棋局至外部伺服器（無網路請求足跡）。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Toggle("🛡️ 偵測到真人計時局自動鎖定提示", isOn: $engineService.humanMatchSafetyLockEnabled)
+                        .tint(.cyan)
+
+                    Text("辨識截圖時若發現倒數計時器且無 Bot/電腦標記，自動隱藏箭頭與走法防止誤封。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Toggle("🎓 教練半提示模式（僅高亮起點格、不畫終點箭頭）", isOn: $engineService.coachPieceOnlyHintMode)
+                        .tint(.orange)
+
+                    Button(role: .destructive) {
+                        viewModel.deleteLastScreenshot()
+                    } label: {
+                        Label("🧹 刪除最近一張辨識截圖", systemImage: "trash")
+                    }
+                    .disabled(!viewModel.screenshotMonitor.hasDeletableScreenshot)
+                }
+
                 Section("引擎思考設定") {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -47,6 +73,13 @@ struct EngineSettingsSheetView: View {
 
                     Toggle("優先使用雲端 Stockfish 16 NNUE", isOn: $engineService.useCloudStockfish)
                         .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
+                        .disabled(engineService.zeroNetworkIsolationMode)
+
+                    if engineService.zeroNetworkIsolationMode {
+                        Text("目前處於「零連網隔離模式」，若要啟用雲端 Stockfish 請先關閉上方隔離模式。")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                 }
 
                 Section("Chess.com App 雙開使用說明") {

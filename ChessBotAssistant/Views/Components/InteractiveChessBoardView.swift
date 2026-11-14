@@ -9,6 +9,8 @@ struct InteractiveChessBoardView: View {
     let pvLines: [PVLine]
     let showAutoHintArrows: Bool
     let highlightedPVIndex: Int?
+    var coachPieceOnlyMode: Bool = false
+    var isSafetyLocked: Bool = false
     let onTapSquare: (BoardSquare) -> Void
 
     private let lightSquareColor = Color(red: 0.922, green: 0.925, blue: 0.816) // #EBECD0
@@ -31,8 +33,8 @@ struct InteractiveChessBoardView: View {
                                 let piece = boardState.squares[boardRow][boardCol]
                                 let isSelected = selectedSquare == square
                                 let targetMove = legalTargets.first { $0.to == square }
-                                let isBestFrom = showAutoHintArrows && pvLines.first?.bestMove.from == square
-                                let isBestTo = showAutoHintArrows && pvLines.first?.bestMove.to == square
+                                let isBestFrom = !isSafetyLocked && showAutoHintArrows && pvLines.first?.bestMove.from == square
+                                let isBestTo = !isSafetyLocked && !coachPieceOnlyMode && showAutoHintArrows && pvLines.first?.bestMove.to == square
                                 let isLastMoveSquare = lastMove?.from == square || lastMove?.to == square
                                 let isCheckedKing = piece?.type == .king &&
                                     piece?.color == boardState.sideToMove &&
@@ -122,7 +124,9 @@ struct InteractiveChessBoardView: View {
                     pvLines: pvLines,
                     perspective: perspective,
                     showArrows: showAutoHintArrows,
-                    highlightedPVIndex: highlightedPVIndex
+                    highlightedPVIndex: highlightedPVIndex,
+                    coachPieceOnlyMode: coachPieceOnlyMode,
+                    isSafetyLocked: isSafetyLocked
                 )
                 .frame(width: boardSize, height: boardSize)
             }

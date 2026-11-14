@@ -5,6 +5,9 @@ struct MultiPVPanelView: View {
     let perspective: PieceColor
     let isAnalyzing: Bool
     let selectedPVIndex: Int?
+    var boardState: ChessBoardState? = nil
+    var coachPieceOnlyMode: Bool = false
+    var isSafetyLocked: Bool = false
     let onSelectPV: (PVLine) -> Void
     let onPlayPV: (PVLine) -> Void
 
@@ -58,7 +61,25 @@ struct MultiPVPanelView: View {
                 }
             }
 
-            if let lines = analysis?.lines, !lines.isEmpty {
+            if isSafetyLocked {
+                HStack(spacing: 10) {
+                    Image(systemName: "shield.slash.fill")
+                        .font(.title3)
+                        .foregroundColor(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("已啟用真人計時賽防誤封鎖定")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.white)
+                        Text("已隱藏推薦走法與箭頭，避免誤用於真人對局。")
+                            .font(.caption)
+                            .foregroundColor(Color(white: 0.72))
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .background(Color.red.opacity(0.16))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else if let lines = analysis?.lines, !lines.isEmpty {
                 VStack(spacing: 7) {
                     ForEach(lines) { line in
                         let accent = rankAccentColor(line.multipvIndex)
@@ -76,22 +97,32 @@ struct MultiPVPanelView: View {
                                         .font(.system(size: 12, weight: .heavy, design: .rounded))
                                         .foregroundColor(accent)
 
-                                    Text(line.bestMove.san)
-                                        .font(.system(size: 16, weight: .heavy, design: .monospaced))
-                                        .foregroundColor(.white)
+                                    if coachPieceOnlyMode {
+                                        let pieceName = boardState?.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
+                                        Text("建議動 \(pieceName)")
+                                            .font(.system(size: 15, weight: .heavy))
+                                            .foregroundColor(.white)
+                                        Text("起點 \(line.bestMove.from.algebraic)")
+                                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                            .foregroundColor(Color(white: 0.78))
+                                    } else {
+                                        Text(line.bestMove.san)
+                                            .font(.system(size: 16, weight: .heavy, design: .monospaced))
+                                            .foregroundColor(.white)
 
-                                    Text(line.bestMove.coordinateDisplay)
-                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.72))
+                                        Text(line.bestMove.coordinateDisplay)
+                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundColor(Color(white: 0.72))
 
-                                    if let tag = line.bestMove.tacticalTag {
-                                        Text(tag)
-                                            .font(.system(size: 10, weight: .bold))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 1.5)
-                                            .background(accent.opacity(0.18))
-                                            .foregroundColor(accent)
-                                            .clipShape(Capsule())
+                                        if let tag = line.bestMove.tacticalTag {
+                                            Text(tag)
+                                                .font(.system(size: 10, weight: .bold))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 1.5)
+                                                .background(accent.opacity(0.18))
+                                                .foregroundColor(accent)
+                                                .clipShape(Capsule())
+                                        }
                                     }
 
                                     Spacer()
@@ -113,7 +144,7 @@ struct MultiPVPanelView: View {
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
                                 }
 
-                                Text(line.continuationPreview)
+                                Text(coachPieceOnlyMode ? "教練半提示模式：隱藏終點與續著，鼓勵自主計算" : line.continuationPreview)
                                     .font(.system(size: 11.5, weight: .regular, design: .monospaced))
                                     .foregroundColor(Color(white: 0.65))
                                     .lineLimit(1)
@@ -123,16 +154,18 @@ struct MultiPVPanelView: View {
                                 onSelectPV(line)
                             }
 
-                            Button {
-                                onPlayPV(line)
-                            } label: {
-                                Text("走這步")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 7)
-                                    .background(accent.opacity(0.22))
-                                    .foregroundColor(accent)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                            if !coachPieceOnlyMode {
+                                Button {
+                                    onPlayPV(line)
+                                } label: {
+                                    Text("走這步")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 7)
+                                        .background(accent.opacity(0.22))
+                                        .foregroundColor(accent)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
                             }
                         }
                         .padding(.horizontal, 10)

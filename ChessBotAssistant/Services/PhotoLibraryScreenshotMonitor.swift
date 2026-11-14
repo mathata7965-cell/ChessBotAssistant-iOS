@@ -7,11 +7,13 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
     @Published private(set) var authorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @Published private(set) var isMonitoring: Bool = false
     @Published private(set) var lastDetectedScreenshotDate: Date?
+    @Published private(set) var hasDeletableScreenshot: Bool = false
 
     var onNewScreenshot: ((UIImage) -> Void)?
 
     private var fetchResult: PHFetchResult<PHAsset>?
     private var lastProcessedAssetID: String?
+    private var lastProcessedAsset: PHAsset?
 
     override init() {
         super.init()
@@ -80,6 +82,9 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
 
         let result = PHAsset.fetchAssets(with: options)
         if let latest = result.firstObject {
+            self.lastProcessedAsset = latest
+            self.lastProcessedAssetID = latest.localIdentifier
+            self.hasDeletableScreenshot = true
             return await loadUIImage(from: latest)
         }
 
@@ -89,7 +94,24 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
         fallbackOptions.fetchLimit = 1
         let fallbackResult = PHAsset.fetchAssets(with: .image, options: fallbackOptions)
         guard let asset = fallbackResult.firstObject else { return nil }
+        self.lastProcessedAsset = asset
+        self.lastProcessedAssetID = asset.localIdentifier
+        self.hasDeletableScreenshot = true
         return await loadUIImage(from: asset)
+    }
+
+    func deleteLastDetectedScreenshot() async -> Bool {
+        guard let asset = lastProcessedAsset else { return false }
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }
+            self.lastProcessedAsset = nil
+            self.hasDeletableScreenshot = false
+            return true
+        } catch {
+            return false
+        }
     }
 
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
@@ -104,7 +126,9 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
 
             if let created = newestAsset.creationDate, Date().timeIntervalSince(created) < 15.0 {
                 self.lastProcessedAssetID = newestAsset.localIdentifier
+                self.lastProcessedAsset = newestAsset
                 self.lastDetectedScreenshotDate = created
+                self.hasDeletableScreenshot = true
                 if let image = await self.loadUIImage(from: newestAsset) {
                     self.onNewScreenshot?(image)
                 }

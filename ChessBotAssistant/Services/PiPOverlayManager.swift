@@ -23,6 +23,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var latestPerspective: PieceColor = .white
     private var latestAutoHint: Bool = true
     private var latestAutoSyncActive: Bool = false
+    private var latestCoachPieceOnlyMode: Bool = false
+    private var latestIsSafetyLocked: Bool = false
+    private var latestZeroNetworkMode: Bool = true
 
     override init() {
         super.init()
@@ -51,13 +54,19 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         analysis: EngineAnalysisResult?,
         perspective: PieceColor,
         autoHintEnabled: Bool,
-        autoSyncActive: Bool
+        autoSyncActive: Bool,
+        coachPieceOnlyMode: Bool,
+        isSafetyLocked: Bool,
+        zeroNetworkMode: Bool
     ) {
         self.latestBoard = board
         self.latestAnalysis = analysis
         self.latestPerspective = perspective
         self.latestAutoHint = autoHintEnabled
         self.latestAutoSyncActive = autoSyncActive
+        self.latestCoachPieceOnlyMode = coachPieceOnlyMode
+        self.latestIsSafetyLocked = isSafetyLocked
+        self.latestZeroNetworkMode = zeroNetworkMode
         pushCurrentFrame()
     }
 
@@ -261,7 +270,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             let bestFromHighlight = UIColor(red: 0.97, green: 0.92, blue: 0.36, alpha: 0.48)
             let bestToHighlight = UIColor(red: 0.35, green: 0.88, blue: 0.45, alpha: 0.45)
 
-            let bestMove = latestAutoHint ? latestAnalysis?.primaryLine?.bestMove : nil
+            let bestMove = (!latestIsSafetyLocked && latestAutoHint) ? latestAnalysis?.primaryLine?.bestMove : nil
 
             for screenRow in 0..<8 {
                 for screenCol in 0..<8 {
@@ -282,7 +291,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                         if bm.from.row == boardRow && bm.from.col == boardCol {
                             bestFromHighlight.setFill()
                             cg.fill(sqRect)
-                        } else if bm.to.row == boardRow && bm.to.col == boardCol {
+                        } else if !latestCoachPieceOnlyMode && bm.to.row == boardRow && bm.to.col == boardCol {
                             bestToHighlight.setFill()
                             cg.fill(sqRect)
                         }
@@ -294,8 +303,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                 }
             }
 
-            // 3. Multi-PV Arrows on Mini Board
-            if latestAutoHint, let lines = latestAnalysis?.lines {
+            // 3. Multi-PV Arrows on Mini Board (suppressed when safety locked or in coach piece-only mode)
+            if !latestIsSafetyLocked && !latestCoachPieceOnlyMode && latestAutoHint, let lines = latestAnalysis?.lines {
                 let arrowColors: [UIColor] = [
                     UIColor(red: 0.25, green: 0.88, blue: 0.48, alpha: 0.92),
                     UIColor(red: 0.22, green: 0.78, blue: 0.96, alpha: 0.78),
@@ -320,96 +329,147 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             let panelX: CGFloat = 500
             let panelW: CGFloat = 204
 
-            // Header badge
-            let badgeRect = CGRect(x: panelX, y: 20, width: panelW, height: 34)
-            UIColor(red: 0.16, green: 0.22, blue: 0.28, alpha: 1.0).setFill()
-            UIBezierPath(roundedRect: badgeRect, cornerRadius: 8).fill()
+            if latestIsSafetyLocked {
+                let warnBox = CGRect(x: panelX, y: 20, width: panelW, height: 390)
+                UIColor(red: 0.28, green: 0.10, blue: 0.11, alpha: 1.0).setFill()
+                UIBezierPath(roundedRect: warnBox, cornerRadius: 12).fill()
+                UIColor(red: 0.95, green: 0.35, blue: 0.35, alpha: 0.9).setStroke()
+                let border = UIBezierPath(roundedRect: warnBox, cornerRadius: 12)
+                border.lineWidth = 2
+                border.stroke()
 
-            let headerAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 14, weight: .bold),
-                .foregroundColor: UIColor(red: 0.52, green: 0.88, blue: 0.48, alpha: 1.0)
-            ]
-            let depthText = latestAnalysis.map { "D\($0.depthReached)" } ?? "..."
-            NSString(string: "BOT 輔助 • \(depthText)").draw(
-                in: badgeRect.insetBy(dx: 10, dy: 7),
-                withAttributes: headerAttr
-            )
-
-            // Side to move & primary eval
-            let turnText = "輪到 \(latestBoard.sideToMove.displayName)"
-            let turnAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 15, weight: .semibold),
-                .foregroundColor: UIColor(white: 0.85, alpha: 1.0)
-            ]
-            NSString(string: turnText).draw(at: CGPoint(x: panelX, y: 66), withAttributes: turnAttr)
-
-            let primary = latestAnalysis?.primaryLine
-            let evalStr = primary?.formattedScore ?? "0.00"
-            let winPct = Int((primary?.winProbability(for: latestPerspective) ?? 50.0).rounded())
-            let evalAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 28, weight: .heavy),
-                .foregroundColor: UIColor.white
-            ]
-            NSString(string: evalStr).draw(at: CGPoint(x: panelX, y: 92), withAttributes: evalAttr)
-
-            let winAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 13, weight: .medium),
-                .foregroundColor: UIColor(white: 0.72, alpha: 1.0)
-            ]
-            NSString(string: "我方勝率 \(winPct)%").draw(at: CGPoint(x: panelX, y: 126), withAttributes: winAttr)
-
-            // Top 3 PV Cards
-            let cardColors: [UIColor] = [
-                UIColor(red: 0.25, green: 0.88, blue: 0.48, alpha: 1.0),
-                UIColor(red: 0.22, green: 0.78, blue: 0.96, alpha: 1.0),
-                UIColor(red: 0.98, green: 0.72, blue: 0.22, alpha: 1.0)
-            ]
-
-            let lines = Array((latestAnalysis?.lines ?? []).prefix(3))
-            for (idx, line) in lines.enumerated() {
-                let cardY = 160 + CGFloat(idx) * 84
-                let cardRect = CGRect(x: panelX, y: cardY, width: panelW, height: 74)
-                UIColor(red: 0.13, green: 0.17, blue: 0.22, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: cardRect, cornerRadius: 10).fill()
-
-                cardColors[idx].withAlphaComponent(0.9).setFill()
-                UIBezierPath(roundedRect: CGRect(x: panelX, y: cardY, width: 6, height: 74), cornerRadius: 3).fill()
-
-                let rankAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 13, weight: .bold),
-                    .foregroundColor: cardColors[idx]
+                let titleAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 18, weight: .heavy),
+                    .foregroundColor: UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
                 ]
-                NSString(string: "#\(idx + 1) \(line.formattedScore)").draw(
-                    at: CGPoint(x: panelX + 14, y: cardY + 8),
-                    withAttributes: rankAttr
-                )
+                NSString(string: "⚠️ 疑似真人計時賽").draw(in: CGRect(x: panelX + 12, y: 46, width: panelW - 24, height: 32), withAttributes: titleAttr)
 
-                let sanAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.monospacedSystemFont(ofSize: 20, weight: .heavy),
+                let bodyAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 14, weight: .semibold),
                     .foregroundColor: UIColor.white
                 ]
-                NSString(string: line.bestMove.san).draw(
-                    at: CGPoint(x: panelX + 14, y: cardY + 26),
-                    withAttributes: sanAttr
+                NSString(string: "已自動鎖定提示防誤封\n\n偵測到倒數計時器且無 Bot 標記。\n\n若確定為電腦練習，請回主視窗點擊「確認為 Bot 對局並解鎖」。").draw(
+                    in: CGRect(x: panelX + 12, y: 92, width: panelW - 24, height: 280),
+                    withAttributes: bodyAttr
+                )
+            } else {
+                // Header badge
+                let badgeRect = CGRect(x: panelX, y: 20, width: panelW, height: 34)
+                UIColor(red: 0.16, green: 0.22, blue: 0.28, alpha: 1.0).setFill()
+                UIBezierPath(roundedRect: badgeRect, cornerRadius: 8).fill()
+
+                let headerAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                    .foregroundColor: UIColor(red: 0.52, green: 0.88, blue: 0.48, alpha: 1.0)
+                ]
+                let depthText = latestAnalysis.map { "D\($0.depthReached)" } ?? "..."
+                let modeBadge = latestCoachPieceOnlyMode ? "教練模式" : "BOT 輔助"
+                NSString(string: "\(modeBadge) • \(depthText)").draw(
+                    in: badgeRect.insetBy(dx: 10, dy: 7),
+                    withAttributes: headerAttr
                 )
 
-                let coordAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .medium),
-                    .foregroundColor: UIColor(white: 0.76, alpha: 1.0)
+                // Side to move & primary eval
+                let turnText = "輪到 \(latestBoard.sideToMove.displayName)"
+                let turnAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 15, weight: .semibold),
+                    .foregroundColor: UIColor(white: 0.85, alpha: 1.0)
                 ]
-                NSString(string: line.bestMove.coordinateDisplay).draw(
-                    at: CGPoint(x: panelX + 14, y: cardY + 51),
-                    withAttributes: coordAttr
-                )
+                NSString(string: turnText).draw(at: CGPoint(x: panelX, y: 66), withAttributes: turnAttr)
+
+                let primary = latestAnalysis?.primaryLine
+                let evalStr = primary?.formattedScore ?? "0.00"
+                let winPct = Int((primary?.winProbability(for: latestPerspective) ?? 50.0).rounded())
+                let evalAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.monospacedDigitSystemFont(ofSize: 28, weight: .heavy),
+                    .foregroundColor: UIColor.white
+                ]
+                NSString(string: evalStr).draw(at: CGPoint(x: panelX, y: 92), withAttributes: evalAttr)
+
+                let winAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 13, weight: .medium),
+                    .foregroundColor: UIColor(white: 0.72, alpha: 1.0)
+                ]
+                NSString(string: "我方勝率 \(winPct)%").draw(at: CGPoint(x: panelX, y: 126), withAttributes: winAttr)
+
+                // Top 3 PV Cards
+                let cardColors: [UIColor] = [
+                    UIColor(red: 0.25, green: 0.88, blue: 0.48, alpha: 1.0),
+                    UIColor(red: 0.22, green: 0.78, blue: 0.96, alpha: 1.0),
+                    UIColor(red: 0.98, green: 0.72, blue: 0.22, alpha: 1.0)
+                ]
+
+                let lines = Array((latestAnalysis?.lines ?? []).prefix(3))
+                for (idx, line) in lines.enumerated() {
+                    let cardY = 160 + CGFloat(idx) * 84
+                    let cardRect = CGRect(x: panelX, y: cardY, width: panelW, height: 74)
+                    UIColor(red: 0.13, green: 0.17, blue: 0.22, alpha: 1.0).setFill()
+                    UIBezierPath(roundedRect: cardRect, cornerRadius: 10).fill()
+
+                    cardColors[idx].withAlphaComponent(0.9).setFill()
+                    UIBezierPath(roundedRect: CGRect(x: panelX, y: cardY, width: 6, height: 74), cornerRadius: 3).fill()
+
+                    let rankAttr: [NSAttributedString.Key: Any] = [
+                        .font: UIFont.systemFont(ofSize: 13, weight: .bold),
+                        .foregroundColor: cardColors[idx]
+                    ]
+                    NSString(string: "#\(idx + 1) \(line.formattedScore)").draw(
+                        at: CGPoint(x: panelX + 14, y: cardY + 8),
+                        withAttributes: rankAttr
+                    )
+
+                    if latestCoachPieceOnlyMode {
+                        let pieceName = latestBoard.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
+                        let hintAttr: [NSAttributedString.Key: Any] = [
+                            .font: UIFont.systemFont(ofSize: 16, weight: .heavy),
+                            .foregroundColor: UIColor.white
+                        ]
+                        NSString(string: "建議動 \(pieceName)").draw(
+                            at: CGPoint(x: panelX + 14, y: cardY + 27),
+                            withAttributes: hintAttr
+                        )
+
+                        let coordAttr: [NSAttributedString.Key: Any] = [
+                            .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .medium),
+                            .foregroundColor: UIColor(white: 0.78, alpha: 1.0)
+                        ]
+                        NSString(string: "提示起點: \(line.bestMove.from.algebraic)").draw(
+                            at: CGPoint(x: panelX + 14, y: cardY + 51),
+                            withAttributes: coordAttr
+                        )
+                    } else {
+                        let sanAttr: [NSAttributedString.Key: Any] = [
+                            .font: UIFont.monospacedSystemFont(ofSize: 20, weight: .heavy),
+                            .foregroundColor: UIColor.white
+                        ]
+                        NSString(string: line.bestMove.san).draw(
+                            at: CGPoint(x: panelX + 14, y: cardY + 26),
+                            withAttributes: sanAttr
+                        )
+
+                        let coordAttr: [NSAttributedString.Key: Any] = [
+                            .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .medium),
+                            .foregroundColor: UIColor(white: 0.76, alpha: 1.0)
+                        ]
+                        NSString(string: line.bestMove.coordinateDisplay).draw(
+                            at: CGPoint(x: panelX + 14, y: cardY + 51),
+                            withAttributes: coordAttr
+                        )
+                    }
+                }
             }
 
             // Footer
-            let footerText = latestAutoSyncActive ? "📸 截圖自動同步中" : "⏸ 手動同步棋盤模式"
+            let netLabel = latestZeroNetworkMode ? "🔒 零連網隔離" : "🛡️ 防誤觸保護"
+            let syncLabel = latestAutoSyncActive ? "📸 同步中" : "⏸ 手動"
+            let footerText = "\(netLabel) • \(syncLabel)"
             let footerAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
-                .foregroundColor: latestAutoSyncActive
-                    ? UIColor(red: 0.45, green: 0.90, blue: 0.58, alpha: 1.0)
-                    : UIColor(white: 0.65, alpha: 1.0)
+                .font: UIFont.systemFont(ofSize: 11.5, weight: .semibold),
+                .foregroundColor: latestIsSafetyLocked
+                    ? UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
+                    : (latestAutoSyncActive
+                        ? UIColor(red: 0.45, green: 0.90, blue: 0.58, alpha: 1.0)
+                        : UIColor(white: 0.65, alpha: 1.0))
             ]
             NSString(string: footerText).draw(at: CGPoint(x: panelX, y: 440), withAttributes: footerAttr)
         }

@@ -19,6 +19,8 @@ final class AssistantViewModel: ObservableObject {
     @Published var isScanningScreenshot: Bool = false
     @Published var lastScanResult: RecognizedBoardResult?
     @Published var lastScannedFullImage: UIImage?
+    @Published var isFairPlaySafetyLocked: Bool = false
+    @Published var safetyLockReason: String?
 
     @Published var showEngineSettingsSheet: Bool = false
     @Published var showScreenshotScannerSheet: Bool = false
@@ -73,6 +75,31 @@ final class AssistantViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        engineService.$coachPieceOnlyHintMode
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.syncPiPContent()
+            }
+            .store(in: &cancellables)
+
+        engineService.$zeroNetworkIsolationMode
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.syncPiPContent()
+            }
+            .store(in: &cancellables)
+
+        engineService.$humanMatchSafetyLockEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                if !enabled {
+                    self?.isFairPlaySafetyLocked = false
+                    self?.safetyLockReason = nil
+                }
+                self?.syncPiPContent()
+            }
+            .store(in: &cancellables)
+
         screenshotMonitor.onNewScreenshot = { [weak self] image in
             Task { @MainActor [weak self] in
                 await self?.processScreenshotImage(image, isFromBackgroundMonitor: true)
@@ -86,7 +113,10 @@ final class AssistantViewModel: ObservableObject {
             analysis: engineService.currentAnalysis,
             perspective: perspective,
             autoHintEnabled: engineService.autoHintEnabled,
-            autoSyncActive: screenshotMonitor.isMonitoring
+            autoSyncActive: screenshotMonitor.isMonitoring,
+            coachPieceOnlyMode: engineService.coachPieceOnlyHintMode,
+            isSafetyLocked: isFairPlaySafetyLocked,
+            zeroNetworkMode: engineService.zeroNetworkIsolationMode
         )
     }
 
@@ -148,6 +178,10 @@ final class AssistantViewModel: ObservableObject {
     }
 
     func playBestMove() {
+        guard !isFairPlaySafetyLocked else {
+            showBanner("安全鎖定中，請先確認為 Bot 對局再使用提示")
+            return
+        }
         guard let best = engineService.currentAnalysis?.primaryLine?.bestMove else {
             showBanner("目前沒有可走的最佳步")
             return
@@ -178,6 +212,8 @@ final class AssistantViewModel: ObservableObject {
         moveHistorySAN.removeAll()
         boardState = .startingPosition
         lastMove = nil
+        isFairPlaySafetyLocked = false
+        safetyLockReason = nil
         clearSelection()
         showBanner("已重置為標準開局")
         triggerAnalysis()
@@ -295,11 +331,37 @@ final class AssistantViewModel: ObservableObject {
 
         lastScanResult = result
 
+        if engineService.humanMatchSafetyLockEnabled && result.isLikelyHumanTimedGame && !result.isConfirmedBotMatch {
+            isFairPlaySafetyLocked = true
+            safetyLockReason = result.detectedMatchContextNote
+        } else {
+            isFairPlaySafetyLocked = false
+            safetyLockReason = nil
+        }
+
         if isFromBackgroundMonitor {
             // Auto-apply directly when triggered from background screenshot while in Chess.com
             applyRecognizedBoard(result, keepSideToMoveIfSameBoard: true)
         } else {
             applyRecognizedBoard(result, keepSideToMoveIfSameBoard: false)
+        }
+    }
+
+    func unlockSafetyLockForBotMatch() {
+        isFairPlaySafetyLocked = false
+        safetyLockReason = nil
+        showBanner("已確認為 Bot 練習對局，恢復顯示輔助提示")
+        syncPiPContent()
+    }
+
+    func deleteLastScreenshot() {
+        Task {
+            let deleted = await screenshotMonitor.deleteLastDetectedScreenshot()
+            if deleted {
+                showBanner("🧹 已從相簿刪除最近一張暫存截圖")
+            } else {
+                showBanner("沒有可刪除的暫存截圖或使用者取消了刪除")
+            }
         }
     }
 
@@ -316,7 +378,11 @@ final class AssistantViewModel: ObservableObject {
         perspective = result.detectedPerspective
         lastMove = nil
         clearSelection()
-        showBanner("截圖辨識完成：\(result.notes)")
+        if isFairPlaySafetyLocked {
+            showBanner("⚠️ \(result.detectedMatchContextNote)")
+        } else {
+            showBanner("截圖辨識完成：\(result.notes)")
+        }
         triggerAnalysis()
     }
 
