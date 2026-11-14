@@ -285,11 +285,21 @@ Expand-Archive -Path $TempZip -DestinationPath $TempExtract -Force
 $ExtractedIpa = Join-Path $TempExtract "ChessBotAssistant.ipa"
 $FinalIpa = Join-Path $RootDir "ChessBotAssistant.ipa"
 Move-Item -Path $ExtractedIpa -Destination $FinalIpa -Force
+
+$ExtractedNoExtIpa = Join-Path $TempExtract "ChessBotAssistant-NoExtension.ipa"
+$FinalNoExtIpa = Join-Path $RootDir "ChessBotAssistant-NoExtension.ipa"
+if (Test-Path $ExtractedNoExtIpa) {
+    Move-Item -Path $ExtractedNoExtIpa -Destination $FinalNoExtIpa -Force
+}
+
 Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue
 Remove-Item -Path $TempExtract -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor Green
-Write-Host "  成功取得側載檔案：$FinalIpa" -ForegroundColor Green
+Write-Host "  成功取得側載檔案（完整版含螢幕直播外掛）：$FinalIpa" -ForegroundColor Green
+if (Test-Path $FinalNoExtIpa) {
+    Write-Host "  成功取得側載檔案（免外掛單一版，僅需 1 個 App ID）：$FinalNoExtIpa" -ForegroundColor Green
+}
 Write-Host "==================================================" -ForegroundColor Green
-Write-Host "現在請打開 Sideloadly / AltStore / SideStore，將上述 .ipa 拖入即可安裝到 iPhone！" -ForegroundColor Cyan
+Write-Host "現在請打開 Sideloadly / AltStore / SideStore，依需要選擇上述 .ipa 拖入即可安裝到 iPhone！" -ForegroundColor Cyan

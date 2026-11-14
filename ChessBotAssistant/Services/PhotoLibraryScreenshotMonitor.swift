@@ -9,13 +9,14 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
     @Published private(set) var lastDetectedScreenshotDate: Date?
     @Published private(set) var hasDeletableScreenshot: Bool = false
 
-    var onNewScreenshot: ((UIImage) -> Void)?
+    var onNewScreenshot: ((UIImage) async -> Bool)?
 
     private var fetchResult: PHFetchResult<PHAsset>?
     private var lastProcessedAssetID: String?
     private var lastProcessedAsset: PHAsset?
     private var inFlightAssetID: String?
     private var inFlightTimestamp: Date = .distantPast
+    private var assetRetryCounts: [String: Int] = [:]
     private var pollTimer: Timer?
 
     override init() {
@@ -102,6 +103,7 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
         pollTimer?.invalidate()
         pollTimer = nil
         inFlightAssetID = nil
+        assetRetryCounts.removeAll()
         if isMonitoring {
             PHPhotoLibrary.shared().unregisterChangeObserver(self)
             isMonitoring = false
@@ -137,7 +139,7 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
         inFlightTimestamp = Date()
 
         let reqOptions = PHImageRequestOptions()
-        reqOptions.deliveryMode = .opportunistic
+        reqOptions.deliveryMode = .highQualityFormat
         reqOptions.resizeMode = .fast
         reqOptions.isNetworkAccessAllowed = true
         reqOptions.isSynchronous = false
@@ -149,23 +151,49 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
             options: reqOptions
         ) { [weak self] image, info in
             let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            if isDegraded { return }
+
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard let image, image.size.width * image.scale >= 240 else {
-                    if !isDegraded && self.inFlightAssetID == assetID {
+                    if self.inFlightAssetID == assetID {
                         self.inFlightAssetID = nil
                     }
                     return
                 }
-                guard self.lastProcessedAssetID != assetID else { return }
-                self.lastProcessedAssetID = assetID
+                guard self.lastProcessedAssetID != assetID else {
+                    if self.inFlightAssetID == assetID {
+                        self.inFlightAssetID = nil
+                    }
+                    return
+                }
+
+                let recognized = await self.onNewScreenshot?(image) ?? false
                 self.inFlightAssetID = nil
-                self.lastProcessedAsset = asset
-                self.lastDetectedScreenshotDate = creationDate
-                self.hasDeletableScreenshot = true
-                self.onNewScreenshot?(image)
+
+                if recognized {
+                    self.lastProcessedAssetID = assetID
+                    self.assetRetryCounts.removeValue(forKey: assetID)
+                    self.lastProcessedAsset = asset
+                    self.lastDetectedScreenshotDate = creationDate
+                    self.hasDeletableScreenshot = true
+                } else {
+                    let attempts = self.assetRetryCounts[assetID, default: 0] + 1
+                    self.assetRetryCounts[assetID] = attempts
+                    if attempts >= 5 {
+                        self.lastProcessedAssetID = assetID
+                        self.assetRetryCounts.removeValue(forKey: assetID)
+                    }
+                }
             }
         }
+    }
+
+    func forceFetchNewestImageIgnoringCache() async -> UIImage? {
+        lastProcessedAssetID = nil
+        inFlightAssetID = nil
+        assetRetryCounts.removeAll()
+        return await fetchLatestScreenshot()
     }
 
     func fetchLatestScreenshot() async -> UIImage? {

@@ -56,6 +56,11 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
             ) as? NSNumber {
                 ciImage = ciImage.oriented(forExifOrientation: Int32(orientationAttachment.uint32Value))
             }
+            if ciImage.extent.origin != .zero {
+                ciImage = ciImage.transformed(
+                    by: CGAffineTransform(translationX: -ciImage.extent.origin.x, y: -ciImage.extent.origin.y)
+                )
+            }
 
             let extent = ciImage.extent
             guard extent.width >= 120, extent.height >= 120 else { return }

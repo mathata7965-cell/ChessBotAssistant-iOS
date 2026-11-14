@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MainAssistantView: View {
-    @StateObject private var viewModel = AssistantViewModel()
+    @ObservedObject var viewModel: AssistantViewModel
     @State private var highlightedPVIndex: Int? = 1
 
     private let accentGreen = Color(red: 0.506, green: 0.714, blue: 0.298) // #81B64C
@@ -420,16 +420,18 @@ struct MainAssistantView: View {
                     .clipShape(Capsule())
             }
 
-            // 方式 A：免截圖螢幕直播實時識別
-            VStack(alignment: .leading, spacing: 4) {
-                SystemBroadcastPickerButton(isActive: viewModel.broadcastService.isBroadcastActive)
-                Text("方式 A（免截圖全自動）：點擊上方按鈕開始直播並開啟「啟動懸浮窗」，切回 Chess.com App 即每 0.45 秒自動同步盤面。")
-                    .font(.caption2)
-                    .foregroundColor(Color(white: 0.68))
-            }
+            // 方法 1（免外掛最穩）：懸浮窗 + 截圖 / PiP 控制鈕 / 背面輕點兩下捷徑
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text("方法 1（免外掛最穩）")
+                        .font(.caption.bold())
+                        .foregroundColor(accentGreen)
+                    Spacer()
+                    Text("支援懸浮窗 ⏯掃描 • ⏩走步 • ⏪悔步")
+                        .font(.caption2)
+                        .foregroundColor(Color(white: 0.72))
+                }
 
-            // 方式 B：截圖自動同步 / 一鍵讀取
-            HStack(spacing: 8) {
                 Button {
                     viewModel.scanLatestScreenshot()
                 } label: {
@@ -449,6 +451,23 @@ struct MainAssistantView: View {
                     .foregroundColor(.cyan)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
+
+                Text("開啟上方「啟動懸浮窗 (PiP)」後，在 Chess.com 截圖約 1 秒自動更新；或直接點懸浮窗上的「⏯」立即重掃，亦可在 iPhone 捷徑設定背面輕點兩下呼叫 chessbot://scan。")
+                    .font(.caption2)
+                    .foregroundColor(Color(white: 0.68))
+            }
+
+            // 方法 2（免截圖螢幕直播實時識別）
+            VStack(alignment: .leading, spacing: 4) {
+                SystemBroadcastPickerButton(
+                    isActive: viewModel.broadcastService.isBroadcastActive,
+                    onUnavailableExtension: {
+                        viewModel.showBanner("目前安裝的是免外掛單一版 IPA，請使用「方法 1（懸浮窗 + 截圖 / ⏯鍵）」")
+                    }
+                )
+                Text("方法 2（螢幕直播 Extension）：需保留 ChessBroadcastExtension 安裝。已自動對齊重簽名 Bundle ID，點按鈕開啟錄製後切回 Chess.com 即自動推播盤面。")
+                    .font(.caption2)
+                    .foregroundColor(Color(white: 0.68))
             }
 
             if viewModel.scanCount > 0 || viewModel.lastRecognizedCropImage != nil {

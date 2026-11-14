@@ -49,7 +49,7 @@ jobs:
           path: xcodebuild.log
           retention-days: 7
 
-      - name: Ad-Hoc Sign & Package Payload into ChessBotAssistant.ipa
+      - name: Ad-Hoc Sign & Package Both Dual & Single-App IPAs
         run: |
           mkdir -p build/ipa/Payload
           cp -R build/Release-iphoneos/ChessBotAssistant.app build/ipa/Payload/
@@ -61,11 +61,21 @@ jobs:
           codesign --force --deep --sign - build/ipa/Payload/ChessBotAssistant.app
           codesign --verify --deep --strict build/ipa/Payload/ChessBotAssistant.app || true
           (cd build/ipa && zip -r ../../ChessBotAssistant.ipa Payload)
-          ls -lh ChessBotAssistant.ipa
 
-      - name: Upload ChessBotAssistant.ipa Artifact
+          mkdir -p build/ipa-noext/Payload
+          cp -R build/Release-iphoneos/ChessBotAssistant.app build/ipa-noext/Payload/
+          rm -rf build/ipa-noext/Payload/ChessBotAssistant.app/PlugIns
+          codesign --force --deep --sign - build/ipa-noext/Payload/ChessBotAssistant.app
+          codesign --verify --deep --strict build/ipa-noext/Payload/ChessBotAssistant.app || true
+          (cd build/ipa-noext && zip -r ../../ChessBotAssistant-NoExtension.ipa Payload)
+
+          ls -lh ChessBotAssistant.ipa ChessBotAssistant-NoExtension.ipa
+
+      - name: Upload ChessBotAssistant IPA Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ChessBotAssistant-ipa
-          path: ChessBotAssistant.ipa
+          path: |
+            ChessBotAssistant.ipa
+            ChessBotAssistant-NoExtension.ipa
           retention-days: 30

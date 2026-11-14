@@ -37,6 +37,7 @@ final class AssistantViewModel: ObservableObject {
     var pipManager = PiPOverlayManager()
 
     private var cancellables = Set<AnyCancellable>()
+    private var hasShownBroadcastSyncBanner: Bool = false
 
     init() {
         setupBindings()
@@ -120,15 +121,44 @@ final class AssistantViewModel: ObservableObject {
             .store(in: &cancellables)
 
         screenshotMonitor.onNewScreenshot = { [weak self] image in
-            Task { @MainActor [weak self] in
-                await self?.processScreenshotImage(image, isFromBackgroundMonitor: true)
-            }
+            guard let self else { return false }
+            return await self.processScreenshotImage(image, isFromBackgroundMonitor: true)
         }
+
+        broadcastService.$isBroadcastActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] active in
+                if !active {
+                    self?.hasShownBroadcastSyncBanner = false
+                }
+                self?.syncPiPContent()
+            }
+            .store(in: &cancellables)
 
         broadcastService.onPayloadReceived = { [weak self] payload in
             Task { @MainActor [weak self] in
                 self?.handleBroadcastPayload(payload)
             }
+        }
+
+        pipManager.onHeartbeatTick = { [weak self] in
+            self?.screenshotMonitor.checkForRecentScreenshotNow()
+        }
+
+        pipManager.onPiPPlayPauseTapped = { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.forceScanFromPiP()
+            }
+        }
+
+        pipManager.onPiPSkipForwardTapped = { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.handlePiPSkipForward()
+            }
+        }
+
+        pipManager.onPiPSkipBackwardTapped = { [weak self] in
+            self?.handlePiPSkipBackward()
         }
 
         NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
@@ -357,6 +387,11 @@ final class AssistantViewModel: ObservableObject {
         lastSyncTimestamp = Date()
         scanCount += 1
 
+        if !hasShownBroadcastSyncBanner {
+            hasShownBroadcastSyncBanner = true
+            pipManager.showPiPBanner("✅ 實時畫面同步中")
+        }
+
         guard boardChanged || perspChanged else { return }
 
         if boardChanged {
@@ -371,6 +406,82 @@ final class AssistantViewModel: ObservableObject {
         triggerAnalysis()
     }
 
+    func forceScanFromPiP() async {
+        pipManager.showPiPBanner("🔄 掃描最新截圖...")
+        if let image = await screenshotMonitor.forceFetchNewestImageIgnoringCache() {
+            let ok = await processScreenshotImage(image, isFromBackgroundMonitor: true)
+            pipManager.showPiPBanner(ok ? "✅ 已同步" : "⚠️ 未偵測到棋盤")
+            return
+        }
+        if let clipImg = UIPasteboard.general.image {
+            let ok = await processScreenshotImage(clipImg, isFromBackgroundMonitor: true)
+            pipManager.showPiPBanner(ok ? "✅ 已同步剪貼簿" : "⚠️ 無新截圖")
+            return
+        }
+        pipManager.showPiPBanner("⚠️ 無新截圖")
+    }
+
+    func handlePiPSkipForward() async {
+        if screenshotMonitor.isMonitoring {
+            let beforeCount = scanCount
+            screenshotMonitor.checkForRecentScreenshotNow()
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if scanCount > beforeCount {
+                pipManager.showPiPBanner("✅ 已掃描最新畫面")
+                return
+            }
+        }
+
+        guard !isFairPlaySafetyLocked else {
+            pipManager.showPiPBanner("🔒 安全鎖定中")
+            return
+        }
+        guard let best = engineService.currentAnalysis?.primaryLine?.bestMove else {
+            pipManager.showPiPBanner("⚠️ 無可用最佳步")
+            return
+        }
+        let moveLabel = best.san.isEmpty ? best.coordinateDisplay : best.san
+        applyMove(best)
+        pipManager.showPiPBanner("⏩ 已走 \(moveLabel)")
+    }
+
+    func handlePiPSkipBackward() {
+        undoLastMove()
+        pipManager.showPiPBanner("↩️ 已退回一步")
+    }
+
+    func handleIncomingURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "chessbot" else { return }
+        let hostOrPath = (url.host ?? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))).lowercased()
+        guard hostOrPath.isEmpty || hostOrPath == "scan" else { return }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if !self.screenshotMonitor.isMonitoring {
+                _ = await self.screenshotMonitor.requestPermissionAndStart()
+            }
+            self.pipManager.startSilentAudioKeepAlive()
+            if !self.pipManager.isPiPActive {
+                self.pipManager.startPiPIfNeeded()
+            }
+
+            if let latest = await self.screenshotMonitor.forceFetchNewestImageIgnoringCache(),
+               await self.processScreenshotImage(latest, isFromBackgroundMonitor: false) {
+                self.pipManager.showPiPBanner("✅ 已由捷徑掃描同步")
+                return
+            }
+
+            if let clipImg = UIPasteboard.general.image,
+               await self.processScreenshotImage(clipImg, isFromBackgroundMonitor: false) {
+                self.pipManager.showPiPBanner("✅ 已由剪貼簿掃描")
+                return
+            }
+
+            self.pipManager.showPiPBanner("⚠️ 無可掃描截圖")
+            self.showBanner("找不到相簿截圖或剪貼簿圖片")
+        }
+    }
+
     func scanLatestScreenshot() {
         Task {
             isScanningScreenshot = true
@@ -383,7 +494,8 @@ final class AssistantViewModel: ObservableObject {
         }
     }
 
-    func processScreenshotImage(_ image: UIImage, isFromBackgroundMonitor: Bool) async {
+    @discardableResult
+    func processScreenshotImage(_ image: UIImage, isFromBackgroundMonitor: Bool) async -> Bool {
         isScanningScreenshot = true
         lastScannedFullImage = image
         let fallbackPerspective = perspective
@@ -403,7 +515,7 @@ final class AssistantViewModel: ObservableObject {
             if !isFromBackgroundMonitor {
                 showBanner("未在圖片中偵測到 Chess.com 棋盤")
             }
-            return
+            return false
         }
 
         lastScanResult = result
@@ -427,6 +539,7 @@ final class AssistantViewModel: ObservableObject {
         } else {
             applyRecognizedBoard(result, keepSideToMoveIfSameBoard: false)
         }
+        return true
     }
 
     func unlockSafetyLockForBotMatch() {

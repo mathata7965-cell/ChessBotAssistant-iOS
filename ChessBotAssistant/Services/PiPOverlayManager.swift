@@ -13,10 +13,17 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     @Published private(set) var isPiPSupported: Bool = AVPictureInPictureController.isPictureInPictureSupported()
     @Published private(set) var statusMessage: String = "子母畫面待機中"
 
+    var onHeartbeatTick: (() -> Void)?
+    var onPiPPlayPauseTapped: (() -> Void)?
+    var onPiPSkipForwardTapped: (() -> Void)?
+    var onPiPSkipBackwardTapped: (() -> Void)?
+
     let displayLayer = AVSampleBufferDisplayLayer()
     private var pipController: AVPictureInPictureController?
     private var refreshTimer: Timer?
     private var silentAudioPlayer: AVAudioPlayer?
+    private var pipBannerText: String?
+    private var pipBannerClearTask: Task<Void, Never>?
     private var startTime = CACurrentMediaTime()
 
     private var latestBoard: ChessBoardState = .startingPosition
@@ -31,6 +38,35 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     override init() {
         super.init()
         setupDisplayLayer()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+    }
+
+    @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeRaw = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else {
+            return
+        }
+        if type == .ended && (isPiPActive || latestAutoSyncActive) {
+            startSilentAudioKeepAlive()
+        }
+    }
+
+    func showPiPBanner(_ text: String) {
+        pipBannerText = text
+        pipBannerClearTask?.cancel()
+        pipBannerClearTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.pipBannerText = nil
+            self.pushCurrentFrame()
+        }
+        pushCurrentFrame()
     }
 
     private func setupDisplayLayer() {
@@ -169,11 +205,23 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
 
     private func startFrameHeartbeat() {
         refreshTimer?.invalidate()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] t in
+            guard let self else {
+                t.invalidate()
+                return
+            }
             Task { @MainActor [weak self] in
-                self?.pushCurrentFrame()
+                guard let self else { return }
+                if (self.isPiPActive || self.latestAutoSyncActive),
+                   (self.silentAudioPlayer?.isPlaying != true) {
+                    self.startSilentAudioKeepAlive()
+                }
+                self.onHeartbeatTick?()
+                self.pushCurrentFrame()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
 
     private func stopFrameHeartbeatIfIdle() {
@@ -251,10 +299,10 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         _ pictureInPictureController: AVPictureInPictureController,
         setPlaying playing: Bool
     ) {
-        Task { @MainActor in
-            if playing {
-                self.pushCurrentFrame()
-            }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.onPiPPlayPauseTapped?()
+            self.pushCurrentFrame()
         }
     }
 
@@ -284,6 +332,14 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         skipByInterval skipInterval: CMTime,
         completion completionHandler: @escaping () -> Void
     ) {
+        let isForward = skipInterval.seconds >= 0
+        Task { @MainActor [weak self] in
+            if isForward {
+                self?.onPiPSkipForwardTapped?()
+            } else {
+                self?.onPiPSkipBackwardTapped?()
+            }
+        }
         completionHandler()
     }
 
@@ -533,7 +589,25 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                         ? UIColor(red: 0.45, green: 0.90, blue: 0.58, alpha: 1.0)
                         : UIColor(white: 0.65, alpha: 1.0))
             ]
-            NSString(string: footerText).draw(at: CGPoint(x: panelX, y: 432), withAttributes: footerAttr)
+            NSString(string: footerText).draw(at: CGPoint(x: panelX, y: 422), withAttributes: footerAttr)
+
+            // Bottom status strip / PiP button legend
+            let bottomStatusText = pipBannerText ?? "⏯掃描 ⏩走步 ⏪悔步"
+            let statusStripRect = CGRect(x: 48, y: 454, width: 648, height: 22)
+            if pipBannerText != nil {
+                UIColor(red: 0.16, green: 0.34, blue: 0.22, alpha: 0.95).setFill()
+                UIBezierPath(roundedRect: statusStripRect, cornerRadius: 6).fill()
+            }
+            let statusAttr: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                .foregroundColor: pipBannerText != nil
+                    ? UIColor(red: 0.62, green: 0.98, blue: 0.68, alpha: 1.0)
+                    : UIColor(white: 0.72, alpha: 1.0)
+            ]
+            NSString(string: bottomStatusText).draw(
+                at: CGPoint(x: statusStripRect.minX + 6, y: statusStripRect.minY + 2),
+                withAttributes: statusAttr
+            )
         }
     }
 
