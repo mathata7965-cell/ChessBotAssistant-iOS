@@ -10,6 +10,10 @@ struct MultiPVPanelView: View {
     var isSafetyLocked: Bool = false
     var showOpponentReplyArrow: Bool = true
     var recommendedThinkRange: String? = nil
+    var targetDepth: Int = 12
+    var multiPVCount: Int = 3
+    var onChangeDepth: ((Int) -> Void)? = nil
+    var onChangeMultiPV: ((Int) -> Void)? = nil
     let onSelectPV: (PVLine) -> Void
     let onPlayPV: (PVLine) -> Void
 
@@ -34,14 +38,35 @@ struct MultiPVPanelView: View {
                         .foregroundColor(.white)
                 }
 
-                if let analysis, analysis.depthReached > 0 {
-                    Text("Depth \(analysis.depthReached)")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.10))
-                        .clipShape(Capsule())
-                        .foregroundColor(Color(white: 0.85))
+                Menu {
+                    Picker("思考深度", selection: Binding(
+                        get: { targetDepth },
+                        set: { onChangeDepth?($0) }
+                    )) {
+                        ForEach([6, 10, 12, 15, 18], id: \.self) { depth in
+                            Text("Depth \(depth)").tag(depth)
+                        }
+                    }
+                    Picker("候選走法數", selection: Binding(
+                        get: { multiPVCount },
+                        set: { onChangeMultiPV?($0) }
+                    )) {
+                        ForEach([1, 2, 3], id: \.self) { count in
+                            Text("\(count) 條推薦").tag(count)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("D\(analysis?.depthReached ?? targetDepth) · \(multiPVCount)線")
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8.5, weight: .bold))
+                    }
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.10))
+                    .clipShape(Capsule())
+                    .foregroundColor(Color(white: 0.88))
                 }
 
                 Spacer()
@@ -101,38 +126,33 @@ struct MultiPVPanelView: View {
 
                                     if coachPieceOnlyMode {
                                         let pieceName = boardState?.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
-                                        Text("建議動 \(pieceName)")
-                                            .font(.system(size: 15, weight: .heavy))
+                                        Text("動\(pieceName) (\(line.bestMove.from.algebraic))")
+                                            .font(.system(size: 14.5, weight: .heavy))
                                             .foregroundColor(.white)
-                                        Text("起點 \(line.bestMove.from.algebraic)")
-                                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                            .foregroundColor(Color(white: 0.78))
                                     } else {
                                         Text(line.bestMove.san)
                                             .font(.system(size: 16, weight: .heavy, design: .monospaced))
                                             .foregroundColor(.white)
 
                                         Text(line.bestMove.coordinateDisplay)
-                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                                             .foregroundColor(Color(white: 0.72))
 
-                                        if let tag = line.bestMove.tacticalTag {
-                                            Text(tag)
-                                                .font(.system(size: 10, weight: .bold))
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 1.5)
-                                                .background(accent.opacity(0.18))
-                                                .foregroundColor(accent)
-                                                .clipShape(Capsule())
+                                        if line.multipvIndex == 1 && showOpponentReplyArrow,
+                                           let reply = line.predictedOpponentReply {
+                                            Text("🔮敵:\(reply.san)")
+                                                .font(.system(size: 10.5, weight: .bold))
+                                                .foregroundColor(Color(red: 1.0, green: 0.56, blue: 0.58))
+                                                .lineLimit(1)
                                         }
                                     }
 
                                     Spacer()
 
                                     Text(line.formattedScore)
-                                        .font(.system(size: 13, weight: .heavy, design: .monospaced))
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
+                                        .font(.system(size: 12.5, weight: .heavy, design: .monospaced))
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2.5)
                                         .background(
                                             line.scoreCentipawns >= 0
                                                 ? Color.white.opacity(0.92)
@@ -144,27 +164,36 @@ struct MultiPVPanelView: View {
                                                 : .white
                                         )
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                                    if !coachPieceOnlyMode {
+                                        Button {
+                                            onPlayPV(line)
+                                        } label: {
+                                            Text("走這步")
+                                                .font(.system(size: 11.5, weight: .bold))
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(accent.opacity(0.22))
+                                                .foregroundColor(accent)
+                                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                                        }
+                                    }
                                 }
 
-                                Text(coachPieceOnlyMode ? "教練半提示模式：隱藏終點與續著，鼓勵自主計算" : line.continuationPreview)
-                                    .font(.system(size: 11.5, weight: .regular, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.65))
-                                    .lineLimit(1)
+                                HStack(spacing: 6) {
+                                    Text(coachPieceOnlyMode ? "教練半提示模式：隱藏終點與續著" : line.continuationPreview)
+                                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                        .foregroundColor(Color(white: 0.65))
+                                        .lineLimit(1)
 
-                                if line.multipvIndex == 1 && !coachPieceOnlyMode {
-                                    HStack(spacing: 8) {
-                                        if showOpponentReplyArrow, let reply = line.predictedOpponentReply {
-                                            Text("🔮 預測對手回應: \(reply.san) (\(reply.coordinateDisplay))")
-                                                .font(.system(size: 10.5, weight: .semibold))
-                                                .foregroundColor(Color(red: 1.0, green: 0.56, blue: 0.58))
-                                                .lineLimit(1)
-                                        }
-                                        if let thinkRange = recommendedThinkRange, !thinkRange.isEmpty {
-                                            Text("⏱️ 建議思考 \(thinkRange)")
-                                                .font(.system(size: 10.5, weight: .medium))
-                                                .foregroundColor(Color(red: 0.98, green: 0.80, blue: 0.35))
-                                                .lineLimit(1)
-                                        }
+                                    Spacer(minLength: 0)
+
+                                    if line.multipvIndex == 1 && !coachPieceOnlyMode,
+                                       let thinkRange = recommendedThinkRange, !thinkRange.isEmpty {
+                                        Text("⏱\(thinkRange)")
+                                            .font(.system(size: 10.5, weight: .semibold))
+                                            .foregroundColor(Color(red: 0.98, green: 0.80, blue: 0.35))
+                                            .lineLimit(1)
                                     }
                                 }
                             }
@@ -172,23 +201,9 @@ struct MultiPVPanelView: View {
                             .onTapGesture {
                                 onSelectPV(line)
                             }
-
-                            if !coachPieceOnlyMode {
-                                Button {
-                                    onPlayPV(line)
-                                } label: {
-                                    Text("走這步")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 7)
-                                        .background(accent.opacity(0.22))
-                                        .foregroundColor(accent)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                            }
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
                         .background(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 .fill(isHighlighted ? Color.white.opacity(0.10) : Color(red: 0.14, green: 0.16, blue: 0.19))

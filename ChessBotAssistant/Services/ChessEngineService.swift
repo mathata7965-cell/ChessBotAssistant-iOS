@@ -22,6 +22,15 @@ final class ChessEngineService: ObservableObject {
 
     private var activeTask: Task<Void, Never>?
     private var cloudCache: [String: EngineAnalysisResult] = [:]
+    private var lastRawAnalysis: EngineAnalysisResult?
+    private var lastRawPositionKey: String?
+
+    @discardableResult
+    func reapplyPlayStyle(for board: ChessBoardState) -> Bool {
+        guard lastRawPositionKey == board.positionKey, let raw = lastRawAnalysis else { return false }
+        currentAnalysis = Self.applyPlayStyle(playStyleMode, to: raw, board: board)
+        return true
+    }
 
     func cancelAnalysis() {
         activeTask?.cancel()
@@ -63,6 +72,8 @@ final class ChessEngineService: ObservableObject {
         let cacheKey = "\(board.positionKey)|d\(requestedDepth)|pv\(requestedPV)"
 
         if allowCloud, let cached = cloudCache[cacheKey] {
+            lastRawAnalysis = cached
+            lastRawPositionKey = board.positionKey
             currentAnalysis = Self.applyPlayStyle(activeStyle, to: cached, board: board)
             isAnalyzing = false
             return
@@ -73,9 +84,13 @@ final class ChessEngineService: ObservableObject {
         activeTask = Task { [weak self] in
             guard let self else { return }
 
-            // 1. Run local fast Multi-PV engine off the main thread
+            // 1. Run local fast Multi-PV engine and Cloud query in parallel
             let localMaxDepth = isZeroNetwork ? min(requestedDepth, 6) : min(requestedDepth, 5)
-            let localBudget: TimeInterval = isZeroNetwork ? 1.1 : 0.9
+            let localBudget: TimeInterval = isZeroNetwork ? 0.85 : 0.40
+
+            async let cloudTask: EngineAnalysisResult? = allowCloud
+                ? self.fetchCloudAnalysis(board: board, requestedDepth: requestedDepth, multiPV: requestedPV)
+                : nil
 
             let localResult = await Task.detached(priority: .userInitiated) {
                 LocalAlphaBetaEngine.analyze(
@@ -88,6 +103,8 @@ final class ChessEngineService: ObservableObject {
             }.value
 
             if Task.isCancelled { return }
+            self.lastRawAnalysis = localResult
+            self.lastRawPositionKey = board.positionKey
             self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, to: localResult, board: board)
 
             // 2. If Cloud Stockfish is disabled or Zero-Network Isolation is active, finish strictly offline
@@ -96,16 +113,18 @@ final class ChessEngineService: ObservableObject {
                 return
             }
 
-            // 3. Query Cloud Stockfish 16 NNUE (Lichess Multi-PV first, then Stockfish.online)
-            if let cloudResult = await self.fetchCloudAnalysis(
-                board: board,
-                requestedDepth: requestedDepth,
-                multiPV: requestedPV,
-                localFallbackLines: localResult.lines
-            ) {
+            // 3. Await parallel Cloud Stockfish 16 NNUE result and merge fallback lines
+            if let rawCloud = await cloudTask {
                 if Task.isCancelled { return }
-                self.cloudCache[cacheKey] = cloudResult
-                self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, to: cloudResult, board: board)
+                let mergedCloud = Self.mergeCloudWithLocalFallback(
+                    cloud: rawCloud,
+                    localLines: localResult.lines,
+                    multiPV: requestedPV
+                )
+                self.cloudCache[cacheKey] = mergedCloud
+                self.lastRawAnalysis = mergedCloud
+                self.lastRawPositionKey = board.positionKey
+                self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, to: mergedCloud, board: board)
             }
 
             if !Task.isCancelled {
@@ -116,14 +135,55 @@ final class ChessEngineService: ObservableObject {
 
     // MARK: - Cloud Stockfish Integration
 
+    private static func mergeCloudWithLocalFallback(
+        cloud: EngineAnalysisResult,
+        localLines: [PVLine],
+        multiPV: Int
+    ) -> EngineAnalysisResult {
+        guard cloud.lines.count < multiPV else { return cloud }
+        var merged = cloud.lines
+        let existingUCIs = Set(merged.map { $0.bestMove.uci })
+        var nextIdx = merged.count + 1
+
+        for local in localLines where !existingUCIs.contains(local.bestMove.uci) {
+            if merged.count >= multiPV { break }
+            merged.append(PVLine(
+                multipvIndex: nextIdx,
+                bestMove: local.bestMove,
+                continuationSAN: local.continuationSAN,
+                continuationUCI: local.continuationUCI,
+                scoreCentipawns: local.scoreCentipawns,
+                mateInMoves: local.mateInMoves,
+                depth: local.depth,
+                sourceLabel: "本地備選",
+                predictedOpponentReply: local.predictedOpponentReply
+            ))
+            nextIdx += 1
+        }
+
+        return EngineAnalysisResult(
+            fen: cloud.fen,
+            sideToMove: cloud.sideToMove,
+            lines: merged,
+            depthReached: cloud.depthReached,
+            isCloudVerified: cloud.isCloudVerified,
+            engineSource: cloud.engineSource,
+            nodesSearched: cloud.nodesSearched,
+            timestamp: cloud.timestamp
+        )
+    }
+
     private func fetchCloudAnalysis(
         board: ChessBoardState,
         requestedDepth: Int,
-        multiPV: Int,
-        localFallbackLines: [PVLine]
+        multiPV: Int
     ) async -> EngineAnalysisResult? {
-        // Try Lichess Cloud Eval (supports multiPv=3 natively)
-        if let lichessLines = await queryLichessCloudEval(board: board, multiPV: multiPV), !lichessLines.lines.isEmpty {
+        let sfDepth = min(max(requestedDepth, 10), 15)
+        async let lichessTask = queryLichessCloudEval(board: board, multiPV: multiPV)
+        async let sfOnlineTask = queryStockfishOnline(board: board, depth: sfDepth)
+
+        // Prefer Lichess Cloud Eval (supports Multi-PV natively)
+        if let lichessLines = await lichessTask, !lichessLines.lines.isEmpty {
             return EngineAnalysisResult(
                 fen: board.toFEN(),
                 sideToMove: board.sideToMove,
@@ -138,29 +198,12 @@ final class ChessEngineService: ObservableObject {
 
         if Task.isCancelled { return nil }
 
-        // Fallback to stockfish.online API (works on any arbitrary midgame/endgame position)
-        let sfDepth = min(max(requestedDepth, 10), 15)
-        if let sfLine = await queryStockfishOnline(board: board, depth: sfDepth) {
-            var merged: [PVLine] = [sfLine]
-            var nextIdx = 2
-            for local in localFallbackLines where local.bestMove.uci != sfLine.bestMove.uci {
-                if merged.count >= multiPV { break }
-                merged.append(PVLine(
-                    multipvIndex: nextIdx,
-                    bestMove: local.bestMove,
-                    continuationSAN: local.continuationSAN,
-                    continuationUCI: local.continuationUCI,
-                    scoreCentipawns: local.scoreCentipawns,
-                    mateInMoves: local.mateInMoves,
-                    depth: local.depth,
-                    sourceLabel: "本地備選"
-                ))
-                nextIdx += 1
-            }
+        // Fallback to stockfish.online API (already running in parallel)
+        if let sfLine = await sfOnlineTask {
             return EngineAnalysisResult(
                 fen: board.toFEN(),
                 sideToMove: board.sideToMove,
-                lines: merged,
+                lines: [sfLine],
                 depthReached: sfDepth,
                 isCloudVerified: true,
                 engineSource: "Stockfish 16 NNUE",
@@ -181,7 +224,7 @@ final class ChessEngineService: ObservableObject {
         ]
         guard let url = components.url else { return nil }
 
-        var req = URLRequest(url: url, timeoutInterval: 4.5)
+        var req = URLRequest(url: url, timeoutInterval: 2.2)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
         do {
@@ -235,7 +278,7 @@ final class ChessEngineService: ObservableObject {
         ]
         guard let url = components.url else { return nil }
 
-        let req = URLRequest(url: url, timeoutInterval: 6.5)
+        let req = URLRequest(url: url, timeoutInterval: 4.0)
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)

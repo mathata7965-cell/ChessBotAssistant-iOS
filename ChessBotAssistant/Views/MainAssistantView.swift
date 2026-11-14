@@ -13,64 +13,36 @@ struct MainAssistantView: View {
                     .ignoresSafeArea()
 
                 ScrollView {
-                    VStack(spacing: 12) {
-                        // 1. PiP & Background Screenshot Auto-Sync Card
+                    VStack(spacing: 10) {
+                        // 1. Sleek Single-Card Top Control Deck
                         PiPPreviewCardView(
                             pipManager: viewModel.pipManager,
                             isAutoSyncEnabled: viewModel.screenshotMonitor.isMonitoring || viewModel.broadcastService.isBroadcastActive,
+                            isBroadcastActive: viewModel.broadcastService.isBroadcastActive,
+                            isScanning: viewModel.isScanningScreenshot,
                             onTogglePiP: {
                                 viewModel.togglePiPWithAutoSync()
                             },
                             onToggleAutoSync: {
                                 viewModel.toggleAutoScreenshotSync()
+                            },
+                            onScanNow: {
+                                viewModel.scanLatestScreenshot()
+                            },
+                            onUnavailableBroadcast: {
+                                viewModel.showBanner("免外掛版請用「懸浮窗 + 截圖」")
                             }
                         )
 
-                        // Chess.com App 實時識別控制台
-                        liveRecognitionControlCard
-
-                        // 防誤封與隱私保護狀態列
+                        // 5 Core Quick Toggles
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 7) {
-                                protectionPill(
-                                    title: viewModel.engineService.zeroNetworkIsolationMode ? "🔒 零連網隔離:開" : "🌐 雲端連線:開",
-                                    isActive: viewModel.engineService.zeroNetworkIsolationMode,
-                                    activeColor: accentGreen
-                                ) {
-                                    viewModel.engineService.zeroNetworkIsolationMode.toggle()
-                                    viewModel.triggerAnalysis()
-                                }
-
-                                protectionPill(
-                                    title: viewModel.engineService.humanMatchSafetyLockEnabled ? "🛡️ 真人局防誤觸:開" : "⚠️ 真人局鎖:關",
-                                    isActive: viewModel.engineService.humanMatchSafetyLockEnabled,
-                                    activeColor: .cyan
-                                ) {
-                                    viewModel.engineService.humanMatchSafetyLockEnabled.toggle()
-                                }
-
-                                protectionPill(
-                                    title: viewModel.engineService.coachPieceOnlyHintMode ? "🎓 教練半提示:開" : "🎓 教練半提示:關",
-                                    isActive: viewModel.engineService.coachPieceOnlyHintMode,
-                                    activeColor: .orange
-                                ) {
-                                    viewModel.engineService.coachPieceOnlyHintMode.toggle()
-                                }
-
                                 protectionPill(
                                     title: "🧭 \(viewModel.campDetectionMode.displayName)(\(viewModel.perspective == .white ? "白" : "黑"))",
                                     isActive: true,
                                     activeColor: .teal
                                 ) {
                                     viewModel.cycleCampDetectionMode()
-                                }
-
-                                protectionPill(
-                                    title: viewModel.alwaysAnalyzeMyCampTurn ? "♟ 鎖我方回合" : "♟ 依畫面輪次",
-                                    isActive: viewModel.alwaysAnalyzeMyCampTurn,
-                                    activeColor: .indigo
-                                ) {
-                                    viewModel.toggleAlwaysAnalyzeMyCampTurn()
                                 }
 
                                 protectionPill(
@@ -82,7 +54,7 @@ struct MainAssistantView: View {
                                 }
 
                                 protectionPill(
-                                    title: viewModel.engineService.showOpponentReplyArrow ? "🔮 敵步預測:開" : "🔮 敵步預測:關",
+                                    title: "🔮 敵步預測",
                                     isActive: viewModel.engineService.showOpponentReplyArrow,
                                     activeColor: .red
                                 ) {
@@ -90,21 +62,20 @@ struct MainAssistantView: View {
                                 }
 
                                 protectionPill(
-                                    title: viewModel.voiceAnnounceEnabled ? "🔊 語音播報:開" : "🔊 語音播報:關",
+                                    title: "🔊 語音",
                                     isActive: viewModel.voiceAnnounceEnabled,
                                     activeColor: .mint
                                 ) {
                                     viewModel.voiceAnnounceEnabled.toggle()
                                 }
 
-                                if viewModel.screenshotMonitor.hasDeletableScreenshot {
-                                    protectionPill(
-                                        title: "🧹 刪暫存截圖",
-                                        isActive: true,
-                                        activeColor: .pink
-                                    ) {
-                                        viewModel.deleteLastScreenshot()
-                                    }
+                                protectionPill(
+                                    title: viewModel.engineService.zeroNetworkIsolationMode ? "🔒 離線" : "🌐 雲端",
+                                    isActive: viewModel.engineService.zeroNetworkIsolationMode,
+                                    activeColor: accentGreen
+                                ) {
+                                    viewModel.engineService.zeroNetworkIsolationMode.toggle()
+                                    viewModel.triggerAnalysis()
                                 }
                             }
                         }
@@ -191,73 +162,121 @@ struct MainAssistantView: View {
                         .frame(maxWidth: .infinity)
                         .aspectRatio(1.09, contentMode: .fit)
 
-                        // 3. Quick Action Strip
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                actionChip(
-                                    title: "我執\(viewModel.perspective.displayName)",
-                                    icon: "arrow.up.arrow.down",
-                                    tint: .white
-                                ) {
-                                    viewModel.flipPerspective()
-                                }
+                        // 3. Fitted 5-Item Action Strip
+                        HStack(spacing: 6) {
+                            actionChip(
+                                title: "走最佳",
+                                icon: "bolt.fill",
+                                tint: accentGreen,
+                                highlighted: true
+                            ) {
+                                viewModel.playBestMove()
+                            }
 
-                                actionChip(
-                                    title: "輪到\(viewModel.boardState.sideToMove.displayName)",
-                                    icon: "circle.lefthalf.filled",
-                                    tint: viewModel.boardState.sideToMove == .white ? .white : Color(white: 0.75)
-                                ) {
+                            actionChip(
+                                title: "執\(viewModel.perspective == .white ? "白" : "黑")",
+                                icon: "arrow.up.arrow.down",
+                                tint: .white
+                            ) {
+                                viewModel.flipPerspective()
+                            }
+
+                            actionChip(
+                                title: "悔棋",
+                                icon: "arrow.uturn.backward",
+                                tint: .white
+                            ) {
+                                viewModel.undoLastMove()
+                            }
+
+                            actionChip(
+                                title: "掃描器",
+                                icon: "camera.viewfinder",
+                                tint: .cyan
+                            ) {
+                                viewModel.showScreenshotScannerSheet = true
+                            }
+
+                            Menu {
+                                Button {
                                     viewModel.toggleSideToMove()
+                                } label: {
+                                    Label("輪到\(viewModel.boardState.sideToMove.displayName)（切換）", systemImage: "circle.lefthalf.filled")
                                 }
 
-                                actionChip(
-                                    title: "走最佳步",
-                                    icon: "bolt.fill",
-                                    tint: accentGreen,
-                                    highlighted: true
-                                ) {
-                                    viewModel.playBestMove()
+                                Button {
+                                    viewModel.toggleAlwaysAnalyzeMyCampTurn()
+                                } label: {
+                                    Label(
+                                        viewModel.alwaysAnalyzeMyCampTurn ? "✅ 鎖定分析我方回合" : "⬜ 鎖定分析我方回合",
+                                        systemImage: "lock.rotation"
+                                    )
                                 }
 
-                                actionChip(
-                                    title: "掃描截圖",
-                                    icon: "camera.viewfinder",
-                                    tint: .cyan
-                                ) {
-                                    viewModel.showScreenshotScannerSheet = true
+                                Button {
+                                    viewModel.engineService.coachPieceOnlyHintMode.toggle()
+                                } label: {
+                                    Label(
+                                        viewModel.engineService.coachPieceOnlyHintMode ? "✅ 教練半提示模式" : "⬜ 教練半提示模式",
+                                        systemImage: "graduationcap"
+                                    )
                                 }
 
-                                actionChip(
-                                    title: "悔棋",
-                                    icon: "arrow.uturn.backward",
-                                    tint: .white
-                                ) {
-                                    viewModel.undoLastMove()
+                                Button {
+                                    viewModel.engineService.humanMatchSafetyLockEnabled.toggle()
+                                } label: {
+                                    Label(
+                                        viewModel.engineService.humanMatchSafetyLockEnabled ? "✅ 真人計時賽防誤觸" : "⬜ 真人計時賽防誤觸",
+                                        systemImage: "shield"
+                                    )
                                 }
 
-                                actionChip(
-                                    title: "貼上FEN/PGN",
-                                    icon: "doc.on.clipboard",
-                                    tint: .white
-                                ) {
+                                Button {
+                                    viewModel.engineService.autoHintEnabled.toggle()
+                                } label: {
+                                    Label(
+                                        viewModel.engineService.autoHintEnabled ? "✅ 顯示棋盤提示箭頭" : "⬜ 顯示棋盤提示箭頭",
+                                        systemImage: "arrow.up.right"
+                                    )
+                                }
+
+                                Divider()
+
+                                Button {
                                     viewModel.pasteFENOrPGNFromClipboard()
+                                } label: {
+                                    Label("📋 貼上 FEN / PGN", systemImage: "doc.on.clipboard")
                                 }
 
-                                actionChip(
-                                    title: "擺盤編輯",
-                                    icon: "square.grid.3x3",
-                                    tint: .white
-                                ) {
+                                Button {
+                                    viewModel.copyCurrentFEN()
+                                } label: {
+                                    Label("📄 複製當前 FEN", systemImage: "square.on.square")
+                                }
+
+                                Button {
                                     viewModel.showBoardEditorSheet = true
+                                } label: {
+                                    Label("♟️ 手動擺盤編輯", systemImage: "square.grid.3x3")
                                 }
 
-                                actionChip(
-                                    title: "重置開局",
-                                    icon: "arrow.counterclockwise",
-                                    tint: .orange
-                                ) {
-                                    viewModel.resetBoard()
+                                if viewModel.screenshotMonitor.hasDeletableScreenshot {
+                                    Button(role: .destructive) {
+                                        viewModel.deleteLastScreenshot()
+                                    } label: {
+                                        Label("🧹 刪除暫存截圖", systemImage: "trash")
+                                    }
                                 }
+
+                                Divider()
+
+                                Button(role: .destructive) {
+                                    viewModel.resetBoard()
+                                } label: {
+                                    Label("🔄 重置標準開局", systemImage: "arrow.counterclockwise")
+                                }
+                            } label: {
+                                actionChipLabel(title: "更多", icon: "ellipsis", tint: Color(white: 0.85))
                             }
                         }
 
@@ -272,6 +291,16 @@ struct MainAssistantView: View {
                             isSafetyLocked: viewModel.isFairPlaySafetyLocked,
                             showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
                             recommendedThinkRange: viewModel.tacticalRadar.recommendedThinkRange,
+                            targetDepth: viewModel.engineService.targetDepth,
+                            multiPVCount: viewModel.engineService.multiPVCount,
+                            onChangeDepth: { newDepth in
+                                viewModel.engineService.targetDepth = newDepth
+                                viewModel.triggerAnalysis()
+                            },
+                            onChangeMultiPV: { newCount in
+                                viewModel.engineService.multiPVCount = newCount
+                                viewModel.triggerAnalysis()
+                            },
                             onSelectPV: { line in
                                 highlightedPVIndex = line.multipvIndex
                             },
@@ -280,76 +309,8 @@ struct MainAssistantView: View {
                             }
                         )
 
-                        // 4.5 Opening Detection, Tactical Radar & Eval Sparkline
+                        // 4.5 Compact Tactical Radar & Sparkline Card
                         tacticalRadarAndSparklineCard
-
-                        // 5. Inline Depth, Multi-PV & Auto-Hint Controls
-                        VStack(spacing: 10) {
-                            HStack(spacing: 12) {
-                                Text("深度 D\(viewModel.engineService.targetDepth)")
-                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
-                                    .foregroundColor(accentGreen)
-                                    .frame(width: 66, alignment: .leading)
-
-                                Slider(
-                                    value: Binding(
-                                        get: { Double(viewModel.engineService.targetDepth) },
-                                        set: { newVal in
-                                            viewModel.engineService.targetDepth = Int(newVal.rounded())
-                                        }
-                                    ),
-                                    in: 4...18,
-                                    step: 1,
-                                    onEditingChanged: { editing in
-                                        if !editing {
-                                            viewModel.triggerAnalysis()
-                                        }
-                                    }
-                                )
-                                .tint(accentGreen)
-                            }
-
-                            HStack(spacing: 10) {
-                                Text("候選線")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.secondary)
-
-                                Picker("候選線", selection: Binding(
-                                    get: { viewModel.engineService.multiPVCount },
-                                    set: { newVal in
-                                        viewModel.engineService.multiPVCount = newVal
-                                        viewModel.triggerAnalysis()
-                                    }
-                                )) {
-                                    Text("1條").tag(1)
-                                    Text("2條").tag(2)
-                                    Text("3條").tag(3)
-                                }
-                                .pickerStyle(.segmented)
-                                .frame(maxWidth: 165)
-
-                                Spacer()
-
-                                Toggle("箭頭提示", isOn: Binding(
-                                    get: { viewModel.engineService.autoHintEnabled },
-                                    set: { viewModel.engineService.autoHintEnabled = $0 }
-                                ))
-                                    .labelsHidden()
-                                    .tint(accentGreen)
-                                Text("箭頭")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.white)
-                            }
-                        }
-                        .padding(12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(Color(red: 0.11, green: 0.13, blue: 0.15))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                        )
 
                         // Move history strip if any
                         if !viewModel.moveHistorySAN.isEmpty {
@@ -442,136 +403,6 @@ struct MainAssistantView: View {
         .preferredColorScheme(.dark)
     }
 
-    @ViewBuilder
-    private var liveRecognitionControlCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "viewfinder.circle.fill")
-                    .font(.subheadline.bold())
-                    .foregroundColor(.cyan)
-
-                Text("Chess.com App 實時識別控制台")
-                    .font(.subheadline.bold())
-                    .foregroundColor(.white)
-
-                Spacer()
-
-                Text(viewModel.broadcastService.isBroadcastActive ? "直播同步中" : (viewModel.screenshotMonitor.isMonitoring ? "截圖監控中" : "待機"))
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        (viewModel.broadcastService.isBroadcastActive ? Color.green : Color.cyan).opacity(0.20)
-                    )
-                    .foregroundColor(viewModel.broadcastService.isBroadcastActive ? .green : .cyan)
-                    .clipShape(Capsule())
-            }
-
-            // 方法 1（免外掛最穩）：懸浮窗 + 截圖 / PiP 控制鈕 / 背面輕點兩下捷徑
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text("方法 1（免外掛最穩）")
-                        .font(.caption.bold())
-                        .foregroundColor(accentGreen)
-                    Spacer()
-                    Text("支援懸浮窗 ⏯掃描 • ⏩走步 • ⏪悔步")
-                        .font(.caption2)
-                        .foregroundColor(Color(white: 0.72))
-                }
-
-                Button {
-                    viewModel.scanLatestScreenshot()
-                } label: {
-                    HStack(spacing: 6) {
-                        if viewModel.isScanningScreenshot {
-                            ProgressView()
-                                .scaleEffect(0.75)
-                        } else {
-                            Image(systemName: "bolt.fill")
-                        }
-                        Text("⚡ 立即讀取最新 Chess.com 截圖")
-                            .font(.caption.bold())
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(Color.cyan.opacity(0.20))
-                    .foregroundColor(.cyan)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-
-                Text("開啟上方「啟動懸浮窗 (PiP)」後，在 Chess.com 截圖約 1 秒自動更新；或直接點懸浮窗上的「⏯」立即重掃，亦可在 iPhone 捷徑設定背面輕點兩下呼叫 chessbot://scan。")
-                    .font(.caption2)
-                    .foregroundColor(Color(white: 0.68))
-            }
-
-            // 方法 2（免截圖螢幕直播實時識別）
-            VStack(alignment: .leading, spacing: 4) {
-                SystemBroadcastPickerButton(
-                    isActive: viewModel.broadcastService.isBroadcastActive,
-                    onUnavailableExtension: {
-                        viewModel.showBanner("目前安裝的是免外掛單一版 IPA，請使用「方法 1（懸浮窗 + 截圖 / ⏯鍵）」")
-                    }
-                )
-                Text("方法 2（螢幕直播 Extension）：需保留 ChessBroadcastExtension 安裝。已自動對齊重簽名 Bundle ID，點按鈕開啟錄製後切回 Chess.com 即自動推播盤面。")
-                    .font(.caption2)
-                    .foregroundColor(Color(white: 0.68))
-            }
-
-            if viewModel.scanCount > 0 || viewModel.lastRecognizedCropImage != nil {
-                HStack(spacing: 10) {
-                    if let cropImg = viewModel.lastRecognizedCropImage {
-                        Image(uiImage: cropImg)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 54, height: 54)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(accentGreen.opacity(0.6), lineWidth: 1)
-                            )
-                    }
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Text("已成功識別 \(viewModel.scanCount) 次")
-                                .font(.caption.bold())
-                                .foregroundColor(accentGreen)
-                            if let syncDate = viewModel.lastSyncTimestamp {
-                                Text("• \(syncDate, style: .time)")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundColor(Color(white: 0.72))
-                            }
-                        }
-
-                        if let notes = viewModel.lastScanResult?.notes {
-                            Text(notes)
-                                .font(.caption2)
-                                .foregroundColor(Color(white: 0.80))
-                                .lineLimit(2)
-                        } else if let primary = viewModel.engineService.currentAnalysis?.primaryLine {
-                            Text("推薦著法：\(primary.bestMove.san)（\(primary.formattedScore)）")
-                                .font(.caption2.bold())
-                                .foregroundColor(.white)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(8)
-                .background(Color.white.opacity(0.05))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-        }
-        .padding(11)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(red: 0.11, green: 0.14, blue: 0.18))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.cyan.opacity(0.22), lineWidth: 1)
-        )
-    }
-
     private var tacticalRadarAndSparklineCard: some View {
         let radar = viewModel.tacticalRadar
         let diff = radar.materialDiffForPerspective
@@ -580,7 +411,7 @@ struct MainAssistantView: View {
         let points = viewModel.evalHistoryWhitePct
         let latestWhitePct = points.last ?? 50.0
 
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Label(radar.openingName, systemImage: "book.closed.fill")
                     .font(.caption.bold())
@@ -591,36 +422,25 @@ struct MainAssistantView: View {
 
                 if let quality = viewModel.lastMoveQualityBadge {
                     Text(quality)
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 10.5, weight: .bold))
                         .foregroundColor(qualityColor(for: quality))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
                         .background(qualityColor(for: quality).opacity(0.16))
                         .clipShape(Capsule())
                 }
 
                 Text(diffText)
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
                     .foregroundColor(diffColor)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
                     .background(diffColor.opacity(0.16))
                     .clipShape(Capsule())
             }
 
-            HStack(spacing: 6) {
-                Text("🧭 \(viewModel.detectedCampReason)")
-                    .font(.caption2)
-                    .foregroundColor(Color(white: 0.78))
-                    .lineLimit(1)
-                Spacer()
-                Text("⏱ 建議思考 \(radar.recommendedThinkRange)")
-                    .font(.caption2.bold())
-                    .foregroundColor(.yellow.opacity(0.92))
-            }
-
             if !radar.capturedByUser.isEmpty || !radar.capturedByOpponent.isEmpty {
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     if !radar.capturedByUser.isEmpty {
                         Text("我吃: \(radar.capturedByUser.map(pieceGlyph).joined())")
                             .font(.caption2)
@@ -636,33 +456,26 @@ struct MainAssistantView: View {
             }
 
             if !radar.hangingDescriptions.isEmpty {
-                Text("⚠️ 懸空危險：\(radar.hangingDescriptions.joined(separator: "、"))")
+                Text("⚠️ 懸空：\(radar.hangingDescriptions.joined(separator: "、"))")
                     .font(.caption2.bold())
                     .foregroundColor(.red.opacity(0.95))
             }
 
             if !radar.freeTargetDescriptions.isEmpty {
-                Text("🎯 白吃目標：\(radar.freeTargetDescriptions.joined(separator: "、"))")
+                Text("🎯 白吃：\(radar.freeTargetDescriptions.joined(separator: "、"))")
                     .font(.caption2.bold())
                     .foregroundColor(accentGreen)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("📊 白方勝率走勢（近 \(points.count) 步）")
-                        .font(.caption2)
-                        .foregroundColor(Color(white: 0.70))
-                    Spacer()
-                    Text("白 \(Int(latestWhitePct.rounded()))% / 黑 \(100 - Int(latestWhitePct.rounded()))%")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white)
-                }
+            HStack(spacing: 8) {
+                Text("白\(Int(latestWhitePct.rounded()))%")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
 
                 GeometryReader { geo in
                     let w = geo.size.width
                     let h = geo.size.height
                     ZStack {
-                        // 50% baseline
                         Path { path in
                             path.move(to: CGPoint(x: 0, y: h * 0.5))
                             path.addLine(to: CGPoint(x: w, y: h * 0.5))
@@ -693,17 +506,21 @@ struct MainAssistantView: View {
                             let y = h * (1.0 - CGFloat(min(100.0, max(0.0, onlyVal))) / 100.0)
                             Circle()
                                 .fill(Color.cyan)
-                                .frame(width: 6, height: 6)
+                                .frame(width: 5, height: 5)
                                 .position(x: w * 0.5, y: y)
                         }
                     }
                 }
-                .frame(height: 30)
+                .frame(height: 22)
                 .background(Color.white.opacity(0.04))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                Text("黑\(100 - Int(latestWhitePct.rounded()))%")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.72))
             }
         }
-        .padding(11)
+        .padding(9)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color(red: 0.11, green: 0.14, blue: 0.18))
@@ -768,25 +585,37 @@ struct MainAssistantView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.caption.bold())
-                Text(title)
-                    .font(.caption.bold())
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8)
-            .background(
-                highlighted
-                    ? tint.opacity(0.24)
-                    : Color(red: 0.14, green: 0.17, blue: 0.20)
-            )
-            .foregroundColor(tint)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(highlighted ? tint.opacity(0.65) : Color.white.opacity(0.08), lineWidth: 1)
-            )
+            actionChipLabel(title: title, icon: icon, tint: tint, highlighted: highlighted)
         }
+    }
+
+    private func actionChipLabel(
+        title: String,
+        icon: String,
+        tint: Color,
+        highlighted: Bool = false
+    ) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+            Text(title)
+                .font(.system(size: 11.5, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 8)
+        .background(
+            highlighted
+                ? tint.opacity(0.24)
+                : Color(red: 0.14, green: 0.17, blue: 0.20)
+        )
+        .foregroundColor(tint)
+        .clipShape(Capsule())
+        .overlay(
+            Capsule()
+                .stroke(highlighted ? tint.opacity(0.65) : Color.white.opacity(0.08), lineWidth: 1)
+        )
     }
 }

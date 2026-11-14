@@ -111,7 +111,10 @@ final class AssistantViewModel: ObservableObject {
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.triggerAnalysis()
+                guard let self else { return }
+                if !self.engineService.reapplyPlayStyle(for: self.boardState) {
+                    self.triggerAnalysis()
+                }
             }
             .store(in: &cancellables)
 
@@ -715,13 +718,15 @@ final class AssistantViewModel: ObservableObject {
         case .forceBlack: forcedPersp = .black
         }
         let forcedSide: PieceColor? = alwaysAnalyzeMyCampTurn ? forcedPersp : nil
+        let checkHumanMatch = engineService.humanMatchSafetyLockEnabled
         let result = await Task.detached(priority: .userInitiated) {
             await ScreenshotBoardRecognizer.shared.recognizeBoard(
                 from: image,
                 fallbackPerspective: fallbackPerspective,
                 sideToMove: forcedSide,
                 previousBoard: prevBoard,
-                forcedPerspective: forcedPersp
+                forcedPerspective: forcedPersp,
+                checkHumanTimedMatch: checkHumanMatch
             )
         }.value
 
@@ -778,7 +783,6 @@ final class AssistantViewModel: ObservableObject {
 
     func applyRecognizedBoard(_ result: RecognizedBoardResult, keepSideToMoveIfSameBoard: Bool = false) {
         var newBoard = result.boardState
-        _ = keepSideToMoveIfSameBoard
 
         let resolvedCamp: PieceColor
         switch campDetectionMode {
@@ -796,6 +800,14 @@ final class AssistantViewModel: ObservableObject {
         if alwaysAnalyzeMyCampTurn {
             newBoard.sideToMove = resolvedCamp
             newBoard.enPassantTarget = nil
+        }
+
+        let isIdentical = newBoard.squares == boardState.squares
+            && newBoard.sideToMove == boardState.sideToMove
+            && resolvedCamp == perspective
+        if keepSideToMoveIfSameBoard && isIdentical && engineService.currentAnalysis != nil {
+            syncPiPContent()
+            return
         }
 
         history.append(boardState)

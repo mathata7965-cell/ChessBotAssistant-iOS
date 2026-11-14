@@ -26,7 +26,8 @@ final class ScreenshotBoardRecognizer: Sendable {
         fallbackPerspective: PieceColor = .white,
         sideToMove: PieceColor? = nil,
         previousBoard: ChessBoardState = .startingPosition,
-        forcedPerspective: PieceColor? = nil
+        forcedPerspective: PieceColor? = nil,
+        checkHumanTimedMatch: Bool = true
     ) async -> RecognizedBoardResult? {
         guard let uprightCG = normalizedCGImage(from: image) else { return nil }
         guard let syncResult = recognizeBoardSync(
@@ -52,6 +53,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         var resolvedSync = syncResult
         let clampedCropRect = pixelRect.intersection(CGRect(x: 0, y: 0, width: uprightCG.width, height: uprightCG.height))
         if forcedPerspective == nil,
+           syncResult.campConfidence < 0.85,
            let cropped = uprightCG.cropping(to: clampedCropRect),
            let ocrPerspective = await detectBoardPerspective(boardCGImage: cropped) {
             if ocrPerspective != syncResult.detectedPerspective,
@@ -95,10 +97,15 @@ final class ScreenshotBoardRecognizer: Sendable {
         }
 
         // Analyze surrounding header/footer for Fair-Play human timed match detection (CPU-only Vision)
-        let matchContext = await analyzeMatchContext(
-            fullCGImage: uprightCG,
-            boardPixelRect: pixelRect
-        )
+        let matchContext: (isHumanTimed: Bool, isBot: Bool, note: String)
+        if checkHumanTimedMatch {
+            matchContext = await analyzeMatchContext(
+                fullCGImage: uprightCG,
+                boardPixelRect: pixelRect
+            )
+        } else {
+            matchContext = (isHumanTimed: false, isBot: true, note: "快速掃描模式")
+        }
 
         return RecognizedBoardResult(
             boardState: resolvedSync.boardState,
