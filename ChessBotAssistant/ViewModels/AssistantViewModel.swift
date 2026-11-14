@@ -26,9 +26,9 @@ final class AssistantViewModel: ObservableObject {
     @Published var showFENInputAlert: Bool = false
     @Published var fenInputText: String = ""
 
-    let engineService = ChessEngineService()
-    let screenshotMonitor = PhotoLibraryScreenshotMonitor()
-    let pipManager = PiPOverlayManager()
+    var engineService = ChessEngineService()
+    var screenshotMonitor = PhotoLibraryScreenshotMonitor()
+    var pipManager = PiPOverlayManager()
 
     private var cancellables = Set<AnyCancellable>()
 

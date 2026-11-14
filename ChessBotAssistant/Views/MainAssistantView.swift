@@ -196,7 +196,10 @@ struct MainAssistantView: View {
 
                                 Spacer()
 
-                                Toggle("箭頭提示", isOn: $viewModel.engineService.autoHintEnabled)
+                                Toggle("箭頭提示", isOn: Binding(
+                                    get: { viewModel.engineService.autoHintEnabled },
+                                    set: { viewModel.engineService.autoHintEnabled = $0 }
+                                ))
                                     .labelsHidden()
                                     .tint(accentGreen)
                                 Text("箭頭")

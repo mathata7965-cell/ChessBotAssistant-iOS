@@ -2,7 +2,13 @@ import SwiftUI
 
 struct EngineSettingsSheetView: View {
     @ObservedObject var viewModel: AssistantViewModel
+    @ObservedObject var engineService: ChessEngineService
     @Environment(\.dismiss) private var dismiss
+
+    init(viewModel: AssistantViewModel) {
+        self.viewModel = viewModel
+        self._engineService = ObservedObject(wrappedValue: viewModel.engineService)
+    }
 
     var body: some View {
         NavigationStack {
@@ -12,14 +18,14 @@ struct EngineSettingsSheetView: View {
                         HStack {
                             Text("思考深度 (Depth)")
                             Spacer()
-                            Text("Depth \(viewModel.engineService.targetDepth)")
+                            Text("Depth \(engineService.targetDepth)")
                                 .font(.system(.body, design: .monospaced).bold())
                                 .foregroundColor(Color(red: 0.50, green: 0.78, blue: 0.35))
                         }
                         Slider(
                             value: Binding(
-                                get: { Double(viewModel.engineService.targetDepth) },
-                                set: { viewModel.engineService.targetDepth = Int($0.rounded()) }
+                                get: { Double(engineService.targetDepth) },
+                                set: { engineService.targetDepth = Int($0.rounded()) }
                             ),
                             in: 4...18,
                             step: 1
@@ -30,16 +36,16 @@ struct EngineSettingsSheetView: View {
                             .foregroundColor(.secondary)
                     }
 
-                    Picker("候選走法數量 (Multi-PV)", selection: $viewModel.engineService.multiPVCount) {
+                    Picker("候選走法數量 (Multi-PV)", selection: $engineService.multiPVCount) {
                         Text("1 條 (最佳步)").tag(1)
                         Text("2 條推薦").tag(2)
                         Text("3 條推薦").tag(3)
                     }
 
-                    Toggle("自動顯示最佳走法箭頭", isOn: $viewModel.engineService.autoHintEnabled)
+                    Toggle("自動顯示最佳走法箭頭", isOn: $engineService.autoHintEnabled)
                         .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
 
-                    Toggle("優先使用雲端 Stockfish 16 NNUE", isOn: $viewModel.engineService.useCloudStockfish)
+                    Toggle("優先使用雲端 Stockfish 16 NNUE", isOn: $engineService.useCloudStockfish)
                         .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
                 }
 
