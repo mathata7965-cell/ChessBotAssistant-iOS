@@ -1,0 +1,66 @@
+name: Build Sideload-Ready IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-ipa:
+    name: Compile iOS App & Package Sideload IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Xcode & Generate Project via XcodeGen
+        run: |
+          xcodebuild -version
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Build Release iOS App (Ad-Hoc Sideload Ready)
+        run: |
+          set -o pipefail
+          xcodebuild clean build \
+            -project ChessBotAssistant.xcodeproj \
+            -target ChessBotAssistant \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log
+
+      - name: Upload Xcode Build Log on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          retention-days: 7
+
+      - name: Ad-Hoc Sign & Package Payload into ChessBotAssistant.ipa
+        run: |
+          mkdir -p build/ipa/Payload
+          cp -R build/Release-iphoneos/ChessBotAssistant.app build/ipa/Payload/
+          codesign --force --deep --sign - build/ipa/Payload/ChessBotAssistant.app
+          codesign --verify --deep --strict build/ipa/Payload/ChessBotAssistant.app || true
+          (cd build/ipa && zip -r ../../ChessBotAssistant.ipa Payload)
+          ls -lh ChessBotAssistant.ipa
+
+      - name: Upload ChessBotAssistant.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChessBotAssistant-ipa
+          path: ChessBotAssistant.ipa
+          retention-days: 30

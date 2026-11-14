@@ -1,0 +1,330 @@
+import Foundation
+
+enum PieceColor: String, Codable, CaseIterable, Sendable, Hashable {
+    case white
+    case black
+
+    var opposite: PieceColor {
+        self == .white ? .black : .white
+    }
+
+    var displayName: String {
+        self == .white ? "白方" : "黑方"
+    }
+
+    var fenChar: String {
+        self == .white ? "w" : "b"
+    }
+}
+
+enum PieceType: String, Codable, CaseIterable, Sendable, Hashable {
+    case pawn
+    case knight
+    case bishop
+    case rook
+    case queen
+    case king
+
+    var fenUpperChar: Character {
+        switch self {
+        case .pawn: return "P"
+        case .knight: return "N"
+        case .bishop: return "B"
+        case .rook: return "R"
+        case .queen: return "Q"
+        case .king: return "K"
+        }
+    }
+
+    var promotionUCI: String {
+        switch self {
+        case .knight: return "n"
+        case .bishop: return "b"
+        case .rook: return "r"
+        case .queen: return "q"
+        default: return ""
+        }
+    }
+
+    var sanLetter: String {
+        switch self {
+        case .pawn: return ""
+        case .knight: return "N"
+        case .bishop: return "B"
+        case .rook: return "R"
+        case .queen: return "Q"
+        case .king: return "K"
+        }
+    }
+
+    var baseValue: Int {
+        switch self {
+        case .pawn: return 100
+        case .knight: return 320
+        case .bishop: return 330
+        case .rook: return 500
+        case .queen: return 900
+        case .king: return 20000
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .pawn: return "兵"
+        case .knight: return "馬"
+        case .bishop: return "象"
+        case .rook: return "車"
+        case .queen: return "后"
+        case .king: return "王"
+        }
+    }
+}
+
+struct ChessPiece: Codable, Equatable, Hashable, Sendable {
+    let color: PieceColor
+    let type: PieceType
+
+    var fenChar: Character {
+        let upper = type.fenUpperChar
+        return color == .white ? upper : Character(String(upper).lowercased())
+    }
+
+    var symbol: String {
+        String(fenChar)
+    }
+
+    /// Outlined unicode glyph (used for white or labels)
+    var unicode: String {
+        switch (color, type) {
+        case (.white, .king): return "♔"
+        case (.white, .queen): return "♕"
+        case (.white, .rook): return "♖"
+        case (.white, .bishop): return "♗"
+        case (.white, .knight): return "♘"
+        case (.white, .pawn): return "♙"
+        case (.black, .king): return "♚"
+        case (.black, .queen): return "♛"
+        case (.black, .rook): return "♜"
+        case (.black, .bishop): return "♝"
+        case (.black, .knight): return "♞"
+        case (.black, .pawn): return "♟"
+        }
+    }
+
+    /// Filled silhouette glyph (ideal for crisp UI rendering with custom fill + stroke)
+    var solidUnicode: String {
+        switch type {
+        case .king: return "♚"
+        case .queen: return "♛"
+        case .rook: return "♜"
+        case .bishop: return "♝"
+        case .knight: return "♞"
+        case .pawn: return "♟︎"
+        }
+    }
+
+    var baseValue: Int {
+        type.baseValue
+    }
+
+    init(color: PieceColor, type: PieceType) {
+        self.color = color
+        self.type = type
+    }
+
+    init?(fenChar: Character) {
+        let color: PieceColor = fenChar.isUppercase ? .white : .black
+        switch Character(fenChar.uppercased()) {
+        case "P": self.init(color: color, type: .pawn)
+        case "N": self.init(color: color, type: .knight)
+        case "B": self.init(color: color, type: .bishop)
+        case "R": self.init(color: color, type: .rook)
+        case "Q": self.init(color: color, type: .queen)
+        case "K": self.init(color: color, type: .king)
+        default: return nil
+        }
+    }
+}
+
+struct BoardSquare: Codable, Equatable, Hashable, Sendable {
+    /// 0 = rank 8 (top), 7 = rank 1 (bottom)
+    let row: Int
+    /// 0 = file 'a' (left), 7 = file 'h' (right)
+    let col: Int
+
+    var isValid: Bool {
+        row >= 0 && row < 8 && col >= 0 && col < 8
+    }
+
+    var fileChar: Character {
+        let files = Array("abcdefgh")
+        return files[col]
+    }
+
+    var rankNumber: Int {
+        8 - row
+    }
+
+    var algebraic: String {
+        "\(fileChar)\(rankNumber)"
+    }
+
+    var isLightSquare: Bool {
+        (row + col) % 2 == 0
+    }
+
+    init(row: Int, col: Int) {
+        self.row = row
+        self.col = col
+    }
+
+    init?(algebraic: String) {
+        let trimmed = algebraic.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard trimmed.count == 2 else { return nil }
+        let chars = Array(trimmed)
+        let files = Array("abcdefgh")
+        guard let colIndex = files.firstIndex(of: chars[0]),
+              let rank = Int(String(chars[1])),
+              rank >= 1 && rank <= 8 else {
+            return nil
+        }
+        self.row = 8 - rank
+        self.col = colIndex
+    }
+}
+
+struct CastlingRights: Codable, Equatable, Hashable, Sendable {
+    var whiteKingside: Bool = true
+    var whiteQueenside: Bool = true
+    var blackKingside: Bool = true
+    var blackQueenside: Bool = true
+
+    static let all = CastlingRights(whiteKingside: true, whiteQueenside: true, blackKingside: true, blackQueenside: true)
+    static let none = CastlingRights(whiteKingside: false, whiteQueenside: false, blackKingside: false, blackQueenside: false)
+
+    var fenString: String {
+        var str = ""
+        if whiteKingside { str.append("K") }
+        if whiteQueenside { str.append("Q") }
+        if blackKingside { str.append("k") }
+        if blackQueenside { str.append("q") }
+        return str.isEmpty ? "-" : str
+    }
+
+    init(whiteKingside: Bool = true, whiteQueenside: Bool = true, blackKingside: Bool = true, blackQueenside: Bool = true) {
+        self.whiteKingside = whiteKingside
+        self.whiteQueenside = whiteQueenside
+        self.blackKingside = blackKingside
+        self.blackQueenside = blackQueenside
+    }
+
+    init(fenString: String) {
+        self.whiteKingside = fenString.contains("K")
+        self.whiteQueenside = fenString.contains("Q")
+        self.blackKingside = fenString.contains("k")
+        self.blackQueenside = fenString.contains("q")
+    }
+}
+
+struct ChessMove: Identifiable, Codable, Equatable, Hashable, Sendable {
+    let from: BoardSquare
+    let to: BoardSquare
+    let promotion: PieceType?
+    let capturedPiece: ChessPiece?
+    let isEnPassant: Bool
+    let isCastling: Bool
+    var san: String
+    var tacticalTag: String?
+
+    var id: String { uci }
+
+    var uci: String {
+        from.algebraic + to.algebraic + (promotion?.promotionUCI ?? "")
+    }
+
+    var coordinateDisplay: String {
+        let promo = promotion != nil ? "=\(promotion!.sanLetter)" : ""
+        return "\(from.algebraic) → \(to.algebraic)\(promo)"
+    }
+
+    init(
+        from: BoardSquare,
+        to: BoardSquare,
+        promotion: PieceType? = nil,
+        capturedPiece: ChessPiece? = nil,
+        isEnPassant: Bool = false,
+        isCastling: Bool = false,
+        san: String = "",
+        tacticalTag: String? = nil
+    ) {
+        self.from = from
+        self.to = to
+        self.promotion = promotion
+        self.capturedPiece = capturedPiece
+        self.isEnPassant = isEnPassant
+        self.isCastling = isCastling
+        self.san = san
+        self.tacticalTag = tacticalTag
+    }
+}
+
+struct PVLine: Identifiable, Equatable, Sendable {
+    let multipvIndex: Int
+    let bestMove: ChessMove
+    let continuationSAN: [String]
+    let continuationUCI: [String]
+    /// Score in centipawns from White's perspective (+ = White better, - = Black better)
+    let scoreCentipawns: Int
+    /// Mate in N moves from White's perspective (+N = White mates in N, -N = Black mates in N)
+    let mateInMoves: Int?
+    let depth: Int
+    let sourceLabel: String
+
+    var id: Int { multipvIndex }
+
+    /// White's win probability (0.0 ... 100.0)
+    var winProbabilityWhite: Double {
+        if let mate = mateInMoves {
+            return mate > 0 ? 100.0 : 0.0
+        }
+        return 100.0 / (1.0 + exp(-0.00368208 * Double(scoreCentipawns)))
+    }
+
+    func winProbability(for side: PieceColor) -> Double {
+        side == .white ? winProbabilityWhite : (100.0 - winProbabilityWhite)
+    }
+
+    var formattedScore: String {
+        if let mate = mateInMoves {
+            return mate > 0 ? "+M\(mate)" : "-M\(abs(mate))"
+        }
+        let pawns = Double(scoreCentipawns) / 100.0
+        if abs(pawns) < 0.05 {
+            return "0.00"
+        }
+        return String(format: "%+.2f", pawns)
+    }
+
+    var continuationPreview: String {
+        let line = continuationSAN.prefix(6).joined(separator: " ")
+        return line.isEmpty ? bestMove.san : line
+    }
+}
+
+struct EngineAnalysisResult: Equatable, Sendable {
+    let fen: String
+    let sideToMove: PieceColor
+    let lines: [PVLine]
+    let depthReached: Int
+    let isCloudVerified: Bool
+    let engineSource: String
+    let nodesSearched: Int
+    let timestamp: Date
+
+    var primaryLine: PVLine? { lines.first }
+
+    var evalBarFractionWhite: Double {
+        guard let line = primaryLine else { return 0.5 }
+        return min(0.96, max(0.04, line.winProbabilityWhite / 100.0))
+    }
+}
