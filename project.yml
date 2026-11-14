@@ -18,6 +18,8 @@ targets:
       - path: ChessBotAssistant
         excludes:
           - Info.plist
+    dependencies:
+      - target: ChessBroadcastExtension
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.ChessBotAssistant
@@ -27,3 +29,26 @@ targets:
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_STYLE: Automatic
         SWIFT_EMIT_LOC_STRINGS: YES
+
+  ChessBroadcastExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ChessBroadcastExtension
+        excludes:
+          - Info.plist
+      - path: ChessBotAssistant/Models
+      - path: ChessBotAssistant/Services/ScreenshotBoardRecognizer.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ChessBotAssistant.BroadcastExtension
+        INFOPLIST_FILE: ChessBroadcastExtension/Info.plist
+        APPLICATION_EXTENSION_API_ONLY: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+          - "@executable_path/../../Frameworks"
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: YES

@@ -12,31 +12,22 @@ struct MainAssistantView: View {
                 Color(red: 0.082, green: 0.094, blue: 0.110)
                     .ignoresSafeArea()
 
-                VStack(spacing: 8) {
-                    Picker("運作模式", selection: $viewModel.isLiveWebMode) {
-                        Text("📸 官方 App 雙開同步").tag(false)
-                        Text("⚡ 內建實時直連 (免截圖)").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
+                ScrollView {
+                    VStack(spacing: 12) {
+                        // 1. PiP & Background Screenshot Auto-Sync Card
+                        PiPPreviewCardView(
+                            pipManager: viewModel.pipManager,
+                            isAutoSyncEnabled: viewModel.screenshotMonitor.isMonitoring || viewModel.broadcastService.isBroadcastActive,
+                            onTogglePiP: {
+                                viewModel.togglePiPWithAutoSync()
+                            },
+                            onToggleAutoSync: {
+                                viewModel.toggleAutoScreenshotSync()
+                            }
+                        )
 
-                    if viewModel.isLiveWebMode {
-                        liveWebAssistantWorkspace
-                    } else {
-                        ScrollView {
-                            VStack(spacing: 12) {
-                                // 1. PiP & Background Screenshot Auto-Sync Card
-                                PiPPreviewCardView(
-                                    pipManager: viewModel.pipManager,
-                                    isAutoSyncEnabled: viewModel.screenshotMonitor.isMonitoring,
-                                    onTogglePiP: {
-                                        viewModel.togglePiPWithAutoSync()
-                                    },
-                                    onToggleAutoSync: {
-                                        viewModel.toggleAutoScreenshotSync()
-                                    }
-                                )
+                        // Chess.com App 實時識別控制台
+                        liveRecognitionControlCard
 
                         // 防誤封與隱私保護狀態列
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -337,8 +328,6 @@ struct MainAssistantView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                 }
-                    } // end if/else isLiveWebMode
-                } // end outer VStack
             }
             .navigationTitle("Chess Bot 輔助大師")
             .navigationBarTitleDisplayMode(.inline)
@@ -407,128 +396,114 @@ struct MainAssistantView: View {
     }
 
     @ViewBuilder
-    private var liveWebAssistantWorkspace: some View {
-        let primary = viewModel.engineService.currentAnalysis?.primaryLine
-        let lines = Array((viewModel.engineService.currentAnalysis?.lines ?? []).prefix(3))
-        let evalText = primary?.formattedScore ?? "0.00"
-        let winPct = Int((primary?.winProbability(for: viewModel.perspective) ?? 50.0).rounded())
-        let depthStr = viewModel.engineService.currentAnalysis.map { "D\($0.depthReached)" } ?? "..."
+    private var liveRecognitionControlCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "viewfinder.circle.fill")
+                    .font(.subheadline.bold())
+                    .foregroundColor(.cyan)
 
-        VStack(spacing: 8) {
-            // Compact Live Multi-PV Strip
-            VStack(spacing: 6) {
-                HStack(spacing: 8) {
-                    Text(evalText)
-                        .font(.system(size: 20, weight: .heavy, design: .monospaced))
-                        .foregroundColor(.white)
+                Text("Chess.com App 實時識別控制台")
+                    .font(.subheadline.bold())
+                    .foregroundColor(.white)
 
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("輪到 \(viewModel.boardState.sideToMove.displayName) • 勝率 \(winPct)%")
-                            .font(.caption.bold())
-                            .foregroundColor(Color(white: 0.85))
-                        Text("\(depthStr) • 實時 DOM 同步中 (免截圖)")
-                            .font(.caption2)
-                            .foregroundColor(accentGreen)
-                    }
+                Spacer()
 
-                    Spacer()
+                Text(viewModel.broadcastService.isBroadcastActive ? "直播同步中" : (viewModel.screenshotMonitor.isMonitoring ? "截圖監控中" : "待機"))
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        (viewModel.broadcastService.isBroadcastActive ? Color.green : Color.cyan).opacity(0.20)
+                    )
+                    .foregroundColor(viewModel.broadcastService.isBroadcastActive ? .green : .cyan)
+                    .clipShape(Capsule())
+            }
 
-                    Button {
-                        viewModel.engineService.coachPieceOnlyHintMode.toggle()
-                    } label: {
-                        Text(viewModel.engineService.coachPieceOnlyHintMode ? "🎓 半提示" : "全箭頭")
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(viewModel.engineService.coachPieceOnlyHintMode ? Color.orange.opacity(0.25) : accentGreen.opacity(0.22))
-                            .foregroundColor(viewModel.engineService.coachPieceOnlyHintMode ? .orange : accentGreen)
-                            .clipShape(Capsule())
-                    }
+            // 方式 A：免截圖螢幕直播實時識別
+            VStack(alignment: .leading, spacing: 4) {
+                SystemBroadcastPickerButton(isActive: viewModel.broadcastService.isBroadcastActive)
+                Text("方式 A（免截圖全自動）：點擊上方按鈕開始直播並開啟「啟動懸浮窗」，切回 Chess.com App 即每 0.45 秒自動同步盤面。")
+                    .font(.caption2)
+                    .foregroundColor(Color(white: 0.68))
+            }
 
-                    Button {
-                        viewModel.reloadLiveWebBoard()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.caption.bold())
-                            .padding(6)
-                            .background(Color.white.opacity(0.10))
-                            .foregroundColor(.white)
-                            .clipShape(Circle())
-                    }
-                }
-
-                ScrollView(.horizontal, showsIndicators: false) {
+            // 方式 B：截圖自動同步 / 一鍵讀取
+            HStack(spacing: 8) {
+                Button {
+                    viewModel.scanLatestScreenshot()
+                } label: {
                     HStack(spacing: 6) {
-                        ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
-                            let rankColors: [Color] = [accentGreen, .cyan, .orange]
-                            let pillColor = rankColors[min(idx, rankColors.count - 1)]
-                            let labelText: String = {
-                                if viewModel.isFairPlaySafetyLocked {
-                                    return "#\(idx + 1) 已鎖定"
-                                } else if viewModel.engineService.coachPieceOnlyHintMode {
-                                    let pName = viewModel.boardState.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
-                                    return "#\(idx + 1) 動\(pName) \(line.bestMove.from.algebraic) (\(line.formattedScore))"
-                                } else {
-                                    return "#\(idx + 1) \(line.bestMove.san) (\(line.formattedScore))"
-                                }
-                            }()
+                        if viewModel.isScanningScreenshot {
+                            ProgressView()
+                                .scaleEffect(0.75)
+                        } else {
+                            Image(systemName: "bolt.fill")
+                        }
+                        Text("⚡ 立即讀取最新 Chess.com 截圖")
+                            .font(.caption.bold())
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.cyan.opacity(0.20))
+                    .foregroundColor(.cyan)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+            }
 
-                            Text(labelText)
-                                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 5)
-                                .background(pillColor.opacity(0.16))
+            if viewModel.scanCount > 0 || viewModel.lastRecognizedCropImage != nil {
+                HStack(spacing: 10) {
+                    if let cropImg = viewModel.lastRecognizedCropImage {
+                        Image(uiImage: cropImg)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 54, height: 54)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(accentGreen.opacity(0.6), lineWidth: 1)
+                            )
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Text("已成功識別 \(viewModel.scanCount) 次")
+                                .font(.caption.bold())
+                                .foregroundColor(accentGreen)
+                            if let syncDate = viewModel.lastSyncTimestamp {
+                                Text("• \(syncDate, style: .time)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundColor(Color(white: 0.72))
+                            }
+                        }
+
+                        if let notes = viewModel.lastScanResult?.notes {
+                            Text(notes)
+                                .font(.caption2)
+                                .foregroundColor(Color(white: 0.80))
+                                .lineLimit(2)
+                        } else if let primary = viewModel.engineService.currentAnalysis?.primaryLine {
+                            Text("推薦著法：\(primary.bestMove.san)（\(primary.formattedScore)）")
+                                .font(.caption2.bold())
                                 .foregroundColor(.white)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(pillColor.opacity(0.65), lineWidth: 1)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                     }
+                    Spacer(minLength: 0)
                 }
+                .padding(8)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(red: 0.11, green: 0.14, blue: 0.18))
-            )
-
-            // Side-by-side Eval Bar + Built-in Live Chess.com Computer Board WebView
-            HStack(spacing: 6) {
-                EvalBarView(
-                    analysis: viewModel.engineService.currentAnalysis,
-                    perspective: viewModel.perspective,
-                    isAnalyzing: viewModel.engineService.isAnalyzing
-                )
-
-                LiveChessWebView(
-                    lines: viewModel.engineService.currentAnalysis?.lines ?? [],
-                    showArrows: viewModel.engineService.autoHintEnabled
-                        && !viewModel.isFairPlaySafetyLocked
-                        && !viewModel.engineService.coachPieceOnlyHintMode,
-                    coachPieceOnly: viewModel.engineService.coachPieceOnlyHintMode
-                        && viewModel.engineService.autoHintEnabled
-                        && !viewModel.isFairPlaySafetyLocked,
-                    reloadToken: viewModel.liveWebReloadToken,
-                    onBoardSync: { fenBoardPart, isFlipped, turnHint in
-                        viewModel.handleLiveWebBoardUpdate(
-                            fenBoardPart: fenBoardPart,
-                            isFlipped: isFlipped,
-                            turnHint: turnHint
-                        )
-                    }
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                )
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(red: 0.11, green: 0.14, blue: 0.18))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.cyan.opacity(0.22), lineWidth: 1)
+        )
     }
 
     private func protectionPill(

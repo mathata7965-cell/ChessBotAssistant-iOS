@@ -19,10 +19,11 @@ final class AssistantViewModel: ObservableObject {
     @Published var isScanningScreenshot: Bool = false
     @Published var lastScanResult: RecognizedBoardResult?
     @Published var lastScannedFullImage: UIImage?
+    @Published var lastRecognizedCropImage: UIImage?
+    @Published var scanCount: Int = 0
+    @Published var lastSyncTimestamp: Date?
     @Published var isFairPlaySafetyLocked: Bool = false
     @Published var safetyLockReason: String?
-    @Published var isLiveWebMode: Bool = false
-    @Published var liveWebReloadToken: UUID = UUID()
 
     @Published var showEngineSettingsSheet: Bool = false
     @Published var showScreenshotScannerSheet: Bool = false
@@ -32,6 +33,7 @@ final class AssistantViewModel: ObservableObject {
 
     var engineService = ChessEngineService()
     var screenshotMonitor = PhotoLibraryScreenshotMonitor()
+    var broadcastService = LiveScreenBroadcastService()
     var pipManager = PiPOverlayManager()
 
     private var cancellables = Set<AnyCancellable>()
@@ -65,6 +67,13 @@ final class AssistantViewModel: ObservableObject {
             .store(in: &cancellables)
 
         pipManager.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        broadcastService.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
@@ -115,6 +124,19 @@ final class AssistantViewModel: ObservableObject {
                 await self?.processScreenshotImage(image, isFromBackgroundMonitor: true)
             }
         }
+
+        broadcastService.onPayloadReceived = { [weak self] payload in
+            Task { @MainActor [weak self] in
+                self?.handleBroadcastPayload(payload)
+            }
+        }
+
+        NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.screenshotMonitor.checkForRecentScreenshotNow()
+            }
+            .store(in: &cancellables)
     }
 
     func syncPiPContent() {
@@ -123,7 +145,7 @@ final class AssistantViewModel: ObservableObject {
             analysis: engineService.currentAnalysis,
             perspective: perspective,
             autoHintEnabled: engineService.autoHintEnabled,
-            autoSyncActive: screenshotMonitor.isMonitoring,
+            autoSyncActive: screenshotMonitor.isMonitoring || broadcastService.isBroadcastActive,
             coachPieceOnlyMode: engineService.coachPieceOnlyHintMode,
             isSafetyLocked: isFairPlaySafetyLocked,
             zeroNetworkMode: engineService.zeroNetworkIsolationMode
@@ -326,86 +348,26 @@ final class AssistantViewModel: ObservableObject {
         }
     }
 
-    func reloadLiveWebBoard() {
-        liveWebReloadToken = UUID()
-    }
+    private func handleBroadcastPayload(_ payload: LiveBroadcastPayload) {
+        guard let parsedBoard = ChessBoardState(fen: payload.fen) else { return }
+        let newPerspective = PieceColor(rawValue: payload.perspective) ?? perspective
+        let boardChanged = parsedBoard.squares != boardState.squares || parsedBoard.sideToMove != boardState.sideToMove
+        let perspChanged = newPerspective != perspective
 
-    func handleLiveWebBoardUpdate(
-        fenBoardPart: String,
-        isFlipped: Bool,
-        turnHint: PieceColor? = nil
-    ) {
-        let newPerspective: PieceColor = isFlipped ? .black : .white
-        let perspectiveChanged = perspective != newPerspective
-        if perspectiveChanged {
-            perspective = newPerspective
-        }
+        lastSyncTimestamp = Date()
+        scanCount += 1
 
-        let currentFENBoard = boardState.toFEN().split(separator: " ").first.map(String.init) ?? ""
-        if currentFENBoard == fenBoardPart {
-            if let turnHint, boardState.sideToMove != turnHint {
-                boardState.sideToMove = turnHint
-                clearSelection()
-                triggerAnalysis()
-            } else if perspectiveChanged {
-                syncPiPContent()
-            }
-            return
-        }
+        guard boardChanged || perspChanged else { return }
 
-        let candidateSides: [PieceColor] = [boardState.sideToMove, boardState.sideToMove.opposite]
-        for seedSide in candidateSides {
-            var seed = boardState
-            seed.sideToMove = seedSide
-            for move in seed.legalMoves() {
-                let after = seed.applying(move)
-                let afterBoardPart = after.toFEN().split(separator: " ").first.map(String.init) ?? ""
-                if afterBoardPart == fenBoardPart {
-                    if let turnHint, after.sideToMove != turnHint {
-                        continue
-                    }
-                    history.append(boardState)
-                    moveHistorySAN.append(move.san)
-                    boardState = after
-                    lastMove = move
-                    isFairPlaySafetyLocked = false
-                    safetyLockReason = nil
-                    clearSelection()
-                    triggerAnalysis()
-                    return
-                }
-            }
-        }
-
-        let isStartPos = (fenBoardPart == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
-        let inferredSide: PieceColor = isStartPos ? .white : (turnHint ?? newPerspective)
-
-        guard let rawBoard = ChessBoardState(fen: "\(fenBoardPart) \(inferredSide.fenChar) - - 0 1") else {
-            return
-        }
-        var castling = CastlingRights.none
-        if rawBoard.squares[7][4] == ChessPiece(color: .white, type: .king) {
-            if rawBoard.squares[7][7] == ChessPiece(color: .white, type: .rook) { castling.whiteKingside = true }
-            if rawBoard.squares[7][0] == ChessPiece(color: .white, type: .rook) { castling.whiteQueenside = true }
-        }
-        if rawBoard.squares[0][4] == ChessPiece(color: .black, type: .king) {
-            if rawBoard.squares[0][7] == ChessPiece(color: .black, type: .rook) { castling.blackKingside = true }
-            if rawBoard.squares[0][0] == ChessPiece(color: .black, type: .rook) { castling.blackQueenside = true }
-        }
-        var fullBoard = rawBoard
-        fullBoard.castlingRights = castling
-
-        if isStartPos {
-            history.removeAll()
-            moveHistorySAN.removeAll()
-        } else {
+        if boardChanged {
             history.append(boardState)
+            boardState = parsedBoard
+            lastMove = nil
+            clearSelection()
         }
-        boardState = fullBoard
-        lastMove = nil
+        perspective = newPerspective
         isFairPlaySafetyLocked = false
         safetyLockReason = nil
-        clearSelection()
         triggerAnalysis()
     }
 
@@ -445,6 +407,11 @@ final class AssistantViewModel: ObservableObject {
         }
 
         lastScanResult = result
+        if let pngData = result.croppedBoardPNGData {
+            lastRecognizedCropImage = UIImage(data: pngData)
+        }
+        scanCount += 1
+        lastSyncTimestamp = Date()
 
         if engineService.humanMatchSafetyLockEnabled && result.isLikelyHumanTimedGame && !result.isConfirmedBotMatch {
             isFairPlaySafetyLocked = true

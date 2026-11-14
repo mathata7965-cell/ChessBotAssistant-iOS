@@ -26,6 +26,51 @@ final class ScreenshotBoardRecognizer: Sendable {
         previousBoard: ChessBoardState = .startingPosition
     ) async -> RecognizedBoardResult? {
         guard let uprightCG = normalizedCGImage(from: image) else { return nil }
+        guard let syncResult = recognizeBoardSync(
+            from: uprightCG,
+            fallbackPerspective: fallbackPerspective,
+            sideToMove: sideToMove,
+            previousBoard: previousBoard,
+            includePNGCrop: true
+        ) else {
+            return nil
+        }
+
+        let imgW = CGFloat(uprightCG.width)
+        let imgH = CGFloat(uprightCG.height)
+        let pixelRect = CGRect(
+            x: syncResult.boardRectNormalized.minX * imgW,
+            y: syncResult.boardRectNormalized.minY * imgH,
+            width: syncResult.boardRectNormalized.width * imgW,
+            height: syncResult.boardRectNormalized.height * imgH
+        ).integral
+
+        // Analyze surrounding header/footer for Fair-Play human timed match detection (CPU-only Vision)
+        let matchContext = await analyzeMatchContext(
+            fullCGImage: uprightCG,
+            boardPixelRect: pixelRect
+        )
+
+        return RecognizedBoardResult(
+            boardState: syncResult.boardState,
+            croppedBoardPNGData: syncResult.croppedBoardPNGData,
+            boardRectNormalized: syncResult.boardRectNormalized,
+            detectedPerspective: syncResult.detectedPerspective,
+            confidence: syncResult.confidence,
+            notes: syncResult.notes,
+            isLikelyHumanTimedGame: matchContext.isHumanTimed,
+            isConfirmedBotMatch: matchContext.isBot,
+            detectedMatchContextNote: matchContext.note
+        )
+    }
+
+    func recognizeBoardSync(
+        from uprightCG: CGImage,
+        fallbackPerspective: PieceColor = .white,
+        sideToMove: PieceColor? = nil,
+        previousBoard: ChessBoardState = .startingPosition,
+        includePNGCrop: Bool = true
+    ) -> RecognizedBoardResult? {
         let imgW = uprightCG.width
         let imgH = uprightCG.height
         guard imgW >= 120 && imgH >= 120 else { return nil }
@@ -43,28 +88,15 @@ final class ScreenshotBoardRecognizer: Sendable {
             return nil
         }
 
-        // 2. Detect perspective via Vision OCR on board coordinate labels (a-h, 1-8)
-        let detectedPerspective = await detectBoardPerspective(
-            boardCGImage: croppedBoard,
-            fallback: fallbackPerspective
-        )
-
-        // 3. Analyze surrounding header/footer for Fair-Play human timed match detection
-        let matchContext = await analyzeMatchContext(
-            fullCGImage: uprightCG,
-            boardPixelRect: clampedRect
-        )
-
-        // 4. Classify 64 cells
+        // 2. Pure-pixel perspective detection + 64-cell classification (safe for ReplayKit & background)
         let classification = classify64Squares(
             boardCGImage: croppedBoard,
-            perspective: detectedPerspective,
+            fallbackPerspective: fallbackPerspective,
             preferredSideToMove: sideToMove,
             previousBoard: previousBoard
         )
 
-        let croppedUI = UIImage(cgImage: croppedBoard)
-        let pngData = croppedUI.pngData()
+        let pngData: Data? = includePNGCrop ? UIImage(cgImage: croppedBoard).pngData() : nil
 
         let normalizedRect = CGRect(
             x: clampedRect.minX / CGFloat(imgW),
@@ -77,12 +109,12 @@ final class ScreenshotBoardRecognizer: Sendable {
             boardState: classification.board,
             croppedBoardPNGData: pngData,
             boardRectNormalized: normalizedRect,
-            detectedPerspective: detectedPerspective,
+            detectedPerspective: classification.perspective,
             confidence: classification.confidence,
             notes: classification.notes,
-            isLikelyHumanTimedGame: matchContext.isHumanTimed,
-            isConfirmedBotMatch: matchContext.isBot,
-            detectedMatchContextNote: matchContext.note
+            isLikelyHumanTimedGame: false,
+            isConfirmedBotMatch: false,
+            detectedMatchContextNote: "純像素即時同步"
         )
     }
 
@@ -141,7 +173,36 @@ final class ScreenshotBoardRecognizer: Sendable {
         }
 
         var bestScore: Double = -1.0
-        var bestBox = CGRect(x: 0, y: Double(targetH) * 0.25, width: Double(minDim), height: Double(minDim))
+        var bestX: Int = 0
+        var bestY: Int = Int(Double(targetH) * 0.25)
+        var bestSize: Int = minDim
+
+        // Prefer lower 84% of vertical screen first so floating PiP overlay at top isn't matched as the main board
+        let preferredYMin = max(0, Int(Double(targetH) * 0.16))
+        let fallbackYMin = max(0, Int(Double(targetH) * 0.04))
+
+        func scanYRange(size: Int, xCandidates: Set<Int>, yStart: Int, yEnd: Int, step: Int) {
+            for x in xCandidates {
+                var y = yStart
+                while y <= yEnd {
+                    let score = evaluateCheckerboardScore(
+                        rgba: rgba,
+                        bufW: targetW,
+                        bufH: targetH,
+                        x: x,
+                        y: y,
+                        size: size
+                    )
+                    if score > bestScore {
+                        bestScore = score
+                        bestX = x
+                        bestY = y
+                        bestSize = size
+                    }
+                    y += step
+                }
+            }
+        }
 
         for size in candidateSizes where size >= 80 && size <= targetW && size <= targetH {
             let maxX = max(0, targetW - size)
@@ -158,29 +219,48 @@ final class ScreenshotBoardRecognizer: Sendable {
                 }
             }
 
-            let yMin = max(0, Int(Double(targetH) * 0.05))
-            let yMax = max(yMin, targetH - size - Int(Double(targetH) * 0.03))
-            let yStep = 3
+            let yMax = max(preferredYMin, targetH - size - Int(Double(targetH) * 0.03))
+            scanYRange(size: size, xCandidates: Set(xCandidates), yStart: preferredYMin, yEnd: yMax, step: 2)
+        }
 
-            for x in Set(xCandidates) {
-                var y = yMin
-                while y <= yMax {
-                    let score = evaluateCheckerboardScore(
-                        rgba: rgba,
-                        bufW: targetW,
-                        bufH: targetH,
-                        x: x,
-                        y: y,
-                        size: size
-                    )
-                    if score > bestScore {
-                        bestScore = score
-                        bestBox = CGRect(x: x, y: y, width: size, height: size)
+        if bestScore < 20.0 {
+            for size in candidateSizes where size >= 80 && size <= targetW && size <= targetH {
+                let maxX = max(0, targetW - size)
+                let xStep = max(2, maxX / 8)
+                var xCandidates: [Int] = maxX == 0 ? [0] : [maxX / 2]
+                if maxX > 0 {
+                    var x = 0
+                    while x <= maxX {
+                        xCandidates.append(x)
+                        x += xStep
                     }
-                    y += yStep
+                }
+                let upperEnd = min(preferredYMin, max(fallbackYMin, targetH - size))
+                scanYRange(size: size, xCandidates: Set(xCandidates), yStart: fallbackYMin, yEnd: upperEnd, step: 2)
+            }
+        }
+
+        // 1px vertical refinement around best candidate
+        let refineMinY = max(fallbackYMin, bestY - 3)
+        let refineMaxY = min(max(fallbackYMin, targetH - bestSize), bestY + 3)
+        if refineMinY <= refineMaxY {
+            for y in refineMinY...refineMaxY {
+                let score = evaluateCheckerboardScore(
+                    rgba: rgba,
+                    bufW: targetW,
+                    bufH: targetH,
+                    x: bestX,
+                    y: y,
+                    size: bestSize
+                )
+                if score > bestScore {
+                    bestScore = score
+                    bestY = y
                 }
             }
         }
+
+        let bestBox = CGRect(x: bestX, y: bestY, width: bestSize, height: bestSize)
 
         guard bestScore > 12.0 else {
             // Fallback center square if screenshot is heavily obscured
@@ -231,7 +311,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         let lightMed = median(lightLums)
         let darkMed = median(darkLums)
         let contrast = lightMed - darkMed
-        guard contrast > 15.0 else { return -1.0 }
+        guard contrast > 12.0 else { return -1.0 }
 
         // Count how many squares closely match their expected parity background
         var parityMatches = 0
@@ -255,13 +335,13 @@ final class ScreenshotBoardRecognizer: Sendable {
         }
         verticalBoundaryContrast /= 56.0
 
-        // Check sharp transitions along internal horizontal boundaries (7 lines) to prevent rank-shift crops
+        // Check sharp transitions along internal horizontal boundaries (7 lines) with +/-1px tight stride
         var horizontalBoundaryContrast = 0.0
         for c in 0..<8 {
             let px = min(bufW - 1, max(0, x + Int((Double(c) + 0.84) * cell)))
             for r in 1..<8 {
-                let byTop = min(bufH - 1, max(0, y + Int(Double(r) * cell) - 2))
-                let byBottom = min(bufH - 1, max(0, y + Int(Double(r) * cell) + 2))
+                let byTop = min(bufH - 1, max(0, y + Int(Double(r) * cell) - 1))
+                let byBottom = min(bufH - 1, max(0, y + Int(Double(r) * cell) + 1))
                 let iT = (byTop * bufW + px) * 4
                 let iB = (byBottom * bufW + px) * 4
                 let diff = abs(Double(rgba[iT]) - Double(rgba[iB]))
@@ -272,7 +352,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         }
         horizontalBoundaryContrast /= 56.0
 
-        return contrast * 0.4 + Double(parityMatches) * 2.0 + verticalBoundaryContrast * 0.4 + horizontalBoundaryContrast * 0.8
+        return contrast * 0.4 + Double(parityMatches) * 2.0 + verticalBoundaryContrast * 0.4 + horizontalBoundaryContrast * 0.9
     }
 
     // MARK: - Orientation Detection via Vision OCR
@@ -305,26 +385,34 @@ final class ScreenshotBoardRecognizer: Sendable {
     private func recognizeSingleCharLabel(in cgImage: CGImage?) async -> String? {
         guard let cgImage else { return nil }
         return await withCheckedContinuation { continuation in
+            var didResume = false
             let request = VNRecognizeTextRequest { req, _ in
+                guard !didResume else { return }
                 let observations = req.results as? [VNRecognizedTextObservation] ?? []
                 let allText = observations
                     .compactMap { $0.topCandidates(1).first?.string.lowercased() }
                     .joined()
                 for target in ["a", "h", "1", "8"] {
                     if allText.contains(target) {
+                        didResume = true
                         continuation.resume(returning: target)
                         return
                     }
                 }
+                didResume = true
                 continuation.resume(returning: nil)
             }
             request.recognitionLevel = .fast
             request.usesLanguageCorrection = false
+            request.usesCPUOnly = true
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             do {
                 try handler.perform([request])
             } catch {
-                continuation.resume(returning: nil)
+                if !didResume {
+                    didResume = true
+                    continuation.resume(returning: nil)
+                }
             }
         }
     }
@@ -374,7 +462,10 @@ final class ScreenshotBoardRecognizer: Sendable {
 
     private func recognizeAllText(in cgImage: CGImage) async -> String {
         await withCheckedContinuation { continuation in
+            var didResume = false
             let request = VNRecognizeTextRequest { req, _ in
+                guard !didResume else { return }
+                didResume = true
                 let observations = req.results as? [VNRecognizedTextObservation] ?? []
                 let joined = observations
                     .compactMap { $0.topCandidates(1).first?.string }
@@ -383,12 +474,16 @@ final class ScreenshotBoardRecognizer: Sendable {
             }
             request.recognitionLevel = .fast
             request.usesLanguageCorrection = false
+            request.usesCPUOnly = true
             request.recognitionLanguages = ["zh-Hant", "en-US"]
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             do {
                 try handler.perform([request])
             } catch {
-                continuation.resume(returning: "")
+                if !didResume {
+                    didResume = true
+                    continuation.resume(returning: "")
+                }
             }
         }
     }
@@ -423,15 +518,23 @@ final class ScreenshotBoardRecognizer: Sendable {
         let isHighlighted: Bool
     }
 
+    private struct ScreenCellSample {
+        let piece: ChessPiece
+        let confidence: Double
+        let kingLikelihood: Double
+        let coverage: Double
+        let isHighlighted: Bool
+    }
+
     private func classify64Squares(
         boardCGImage: CGImage,
-        perspective: PieceColor,
+        fallbackPerspective: PieceColor,
         preferredSideToMove: PieceColor?,
         previousBoard: ChessBoardState
-    ) -> (board: ChessBoardState, confidence: Double, notes: String) {
+    ) -> (board: ChessBoardState, perspective: PieceColor, confidence: Double, notes: String) {
         let normSize = 400 // 50x50 px per square
         guard let rgba = renderRGBABuffer(cgImage: boardCGImage, width: normSize, height: normSize) else {
-            return (ChessBoardState.startingPosition, 0.0, "無法讀取圖像像素")
+            return (ChessBoardState.startingPosition, fallbackPerspective, 0.0, "無法讀取圖像像素")
         }
 
         let cellSize = 50
@@ -453,11 +556,10 @@ final class ScreenshotBoardRecognizer: Sendable {
         let globalLight = RGBColor(r: median(lightR), g: median(lightG), b: median(lightB))
         let globalDark = RGBColor(r: median(darkR), g: median(darkG), b: median(darkB))
 
-        var observedGrid: [[CellObservation?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
-        var detectedPieceCount = 0
-        var pieceConfidenceSum = 0.0
-        var highlightSquares: Set<BoardSquare> = []
-        var highlightedPieceColor: PieceColor?
+        var screenCells: [[ScreenCellSample?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
+        var screenHighlights: [[Bool]] = Array(repeating: Array(repeating: false, count: 8), count: 8)
+        var whiteBottomScore = 0
+        var blackBottomScore = 0
 
         for screenRow in 0..<8 {
             for screenCol in 0..<8 {
@@ -472,14 +574,8 @@ final class ScreenshotBoardRecognizer: Sendable {
                 )
                 let bgDist = localCorner.distance(to: globalBG)
                 let isHighlighted = screenRow >= 1 && bgDist > 34.0
+                screenHighlights[screenRow][screenCol] = isHighlighted
                 let bg = bgDist > 18.0 ? localCorner : globalBG
-
-                let boardRow = perspective == .white ? screenRow : (7 - screenRow)
-                let boardCol = perspective == .white ? screenCol : (7 - screenCol)
-                let boardSq = BoardSquare(row: boardRow, col: boardCol)
-                if isHighlighted {
-                    highlightSquares.insert(boardSq)
-                }
 
                 if let result = classifyCell(
                     rgba: rgba,
@@ -489,20 +585,62 @@ final class ScreenshotBoardRecognizer: Sendable {
                     cellSize: cellSize,
                     bg: bg
                 ) {
-                    observedGrid[boardRow][boardCol] = CellObservation(
-                        boardRow: boardRow,
-                        boardCol: boardCol,
-                        color: result.piece.color,
-                        guessedPiece: result.piece,
+                    screenCells[screenRow][screenCol] = ScreenCellSample(
+                        piece: result.piece,
                         confidence: result.confidence,
                         kingLikelihood: result.kingLikelihood,
                         coverage: result.coverage,
                         isHighlighted: isHighlighted
                     )
+                    if screenRow >= 5 {
+                        if result.piece.color == .white { whiteBottomScore += 1 } else { blackBottomScore += 1 }
+                    } else if screenRow <= 2 {
+                        if result.piece.color == .black { whiteBottomScore += 1 } else { blackBottomScore += 1 }
+                    }
+                }
+            }
+        }
+
+        let perspective: PieceColor
+        if whiteBottomScore > blackBottomScore {
+            perspective = .white
+        } else if blackBottomScore > whiteBottomScore {
+            perspective = .black
+        } else {
+            perspective = fallbackPerspective
+        }
+
+        var observedGrid: [[CellObservation?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
+        var detectedPieceCount = 0
+        var pieceConfidenceSum = 0.0
+        var highlightSquares: Set<BoardSquare> = []
+        var highlightedPieceColor: PieceColor?
+
+        for screenRow in 0..<8 {
+            for screenCol in 0..<8 {
+                let boardRow = perspective == .white ? screenRow : (7 - screenRow)
+                let boardCol = perspective == .white ? screenCol : (7 - screenCol)
+                let boardSq = BoardSquare(row: boardRow, col: boardCol)
+                let isHighlighted = screenHighlights[screenRow][screenCol]
+                if isHighlighted {
+                    highlightSquares.insert(boardSq)
+                }
+
+                if let cell = screenCells[screenRow][screenCol] {
+                    observedGrid[boardRow][boardCol] = CellObservation(
+                        boardRow: boardRow,
+                        boardCol: boardCol,
+                        color: cell.piece.color,
+                        guessedPiece: cell.piece,
+                        confidence: cell.confidence,
+                        kingLikelihood: cell.kingLikelihood,
+                        coverage: cell.coverage,
+                        isHighlighted: cell.isHighlighted
+                    )
                     detectedPieceCount += 1
-                    pieceConfidenceSum += result.confidence
-                    if isHighlighted {
-                        highlightedPieceColor = result.piece.color
+                    pieceConfidenceSum += cell.confidence
+                    if cell.isHighlighted {
+                        highlightedPieceColor = cell.piece.color
                     }
                 }
             }
@@ -519,7 +657,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         let avgConf = detectedPieceCount > 0 ? (pieceConfidenceSum / Double(detectedPieceCount)) : 0.65
         let turnNote = resolvedSideToMove.displayName
         let note = "已辨識 \(detectedPieceCount) 枚棋子（視角：\(perspective.displayName)｜輪到：\(turnNote)｜\(methodLabel)）"
-        return (reconstructedBoard, avgConf, note)
+        return (reconstructedBoard, perspective, avgConf, note)
     }
 
     private func reconstructGridFromReference(
@@ -918,7 +1056,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         }
 
         if obs.guessedPiece.type == ref.type {
-            score += 1.8
+            score += 8.0
         }
         return score
     }
@@ -984,6 +1122,42 @@ final class ScreenshotBoardRecognizer: Sendable {
         return RGBColor(r: median(rs), g: median(gs), b: median(bs))
     }
 
+    private static let oceanBlackTemplates: [(type: PieceType, grid: [Int])] = [
+        (.rook,   [13,2,4,6,8,4,2,0,2,10,24,22,24,23,14,0,0,6,25,25,25,25,10,0,0,0,21,25,25,25,0,0,0,0,20,25,25,25,1,0,0,0,20,25,25,25,6,0,0,3,23,25,25,25,15,0,0,19,25,25,25,25,24,1]),
+        (.knight, [0,0,3,10,2,0,0,0,0,3,24,25,24,24,12,0,0,12,25,21,25,25,15,0,3,19,13,10,8,25,20,0,1,10,5,10,12,14,21,0,0,0,12,21,14,22,20,0,0,9,23,23,21,23,23,4,0,17,25,25,25,25,25,9]),
+        (.bishop, [0,0,0,13,18,0,0,0,0,0,5,22,7,6,0,0,0,0,19,22,11,24,2,0,0,0,25,20,15,25,8,0,0,4,25,25,25,25,10,0,0,0,21,25,25,24,4,0,0,5,19,25,25,25,17,0,0,15,25,25,25,25,25,2]),
+        (.queen,  [0,0,5,0,0,5,0,0,4,0,15,8,7,13,0,2,7,11,15,19,13,15,10,19,2,23,21,22,11,22,23,7,0,13,22,20,7,10,19,0,0,9,18,17,9,17,11,0,0,12,21,21,23,24,17,0,0,25,25,25,25,25,24,2]),
+        (.king,   [0,0,3,19,24,10,0,0,0,1,11,25,25,20,5,0,5,22,24,25,25,25,25,14,16,25,19,22,25,18,25,24,13,25,17,23,24,19,25,20,1,18,25,25,25,22,23,6,0,8,25,25,25,25,18,0,0,15,25,25,25,25,25,4]),
+        (.pawn,   [4,0,0,2,3,0,0,0,0,0,5,24,22,6,0,0,0,0,14,25,25,10,0,0,0,0,5,21,19,8,0,0,0,0,8,11,19,8,0,0,0,0,6,23,22,11,0,0,0,8,23,25,25,25,9,0,0,18,25,25,25,25,19,0])
+    ]
+
+    private static let oceanWhiteTemplates: [(type: PieceType, grid: [Int])] = [
+        (.rook,   [1,2,4,10,10,5,2,0,0,15,25,25,25,25,15,0,0,13,24,25,25,25,13,0,0,0,16,25,25,14,0,0,0,1,21,25,25,22,1,0,0,1,21,25,25,21,0,0,0,21,25,25,25,25,20,0,0,23,25,25,25,25,24,9]),
+        (.knight, [0,0,0,14,3,0,0,0,0,0,11,24,25,17,0,0,0,0,25,25,21,25,13,0,0,13,12,6,6,25,24,0,0,24,1,3,19,25,25,0,0,5,2,22,25,25,19,0,0,0,5,20,25,25,20,3,0,3,25,25,25,25,25,22]),
+        (.bishop, [0,0,0,22,15,0,0,0,0,0,6,25,10,5,0,0,0,1,20,22,15,22,0,0,0,6,25,21,20,25,1,0,0,7,25,25,25,25,5,0,0,4,25,25,25,25,3,0,0,9,25,25,25,25,8,0,0,25,25,25,25,25,24,9]),
+        (.queen,  [0,0,18,21,11,24,3,0,1,6,17,22,14,23,4,8,11,25,11,22,18,16,14,24,0,11,20,24,24,20,13,12,0,5,11,15,12,16,21,1,0,0,5,0,0,12,10,0,0,1,17,15,15,20,15,0,0,4,25,25,25,25,25,10]),
+        (.king,   [0,0,2,20,23,6,0,0,0,2,5,24,25,10,4,0,9,25,25,24,24,25,25,14,20,24,16,25,25,19,19,20,15,25,12,25,25,9,24,17,5,24,25,25,25,25,24,5,0,15,25,25,25,25,16,0,0,25,25,25,25,25,25,15]),
+        (.pawn,   [0,0,0,0,0,0,0,0,0,0,1,17,17,0,0,0,0,0,9,25,25,16,0,0,0,0,8,25,25,8,0,0,0,0,12,25,25,10,0,0,0,0,5,25,25,4,0,0,0,5,23,25,25,22,3,0,0,15,25,25,25,25,14,0])
+    ]
+
+    private func extractGrid64(from mask: [[Bool]]) -> [Int] {
+        var vec = [Int]()
+        vec.reserveCapacity(64)
+        for by in 0..<8 {
+            for bx in 0..<8 {
+                var cnt = 0
+                for dy in 0..<5 {
+                    let row = mask[by * 5 + dy]
+                    for dx in 0..<5 where row[bx * 5 + dx] {
+                        cnt += 1
+                    }
+                }
+                vec.append(cnt)
+            }
+        }
+        return vec
+    }
+
     private func classifyCell(
         rgba: [UInt8],
         strideW: Int,
@@ -1035,6 +1209,30 @@ final class ScreenshotBoardRecognizer: Sendable {
         let avgRMinusB = fgCount > 0 ? fgRMinusBSum / Double(fgCount) : 0.0
         let avgLum = fgCount > 0 ? fgLumSum / Double(fgCount) : 0.0
         let pieceColor: PieceColor = (avgRMinusB > 5.0 || avgLum > 145.0) ? .white : .black
+
+        // 8x8 block density template match (supports custom 3D skins like Ocean dolphin/racecar/gas-mask sets)
+        let grid64 = extractGrid64(from: mask)
+        let templates = (pieceColor == .white) ? Self.oceanWhiteTemplates : Self.oceanBlackTemplates
+        var bestTmplType: PieceType = .pawn
+        var bestTmplDist = Int.max
+        var kingTmplDist = 400
+        for tmpl in templates {
+            var dist = 0
+            for i in 0..<64 {
+                dist += abs(grid64[i] - tmpl.grid[i])
+            }
+            if tmpl.type == .king {
+                kingTmplDist = dist
+            }
+            if dist < bestTmplDist {
+                bestTmplDist = dist
+                bestTmplType = tmpl.type
+            }
+        }
+        if bestTmplDist < 240 {
+            let tmplKingLikelihood = bestTmplType == .king ? 1.2 : max(0.0, 1.0 - Double(kingTmplDist) / 400.0)
+            return (ChessPiece(color: pieceColor, type: bestTmplType), 0.94, tmplKingLikelihood, coverage)
+        }
 
         // Extract geometric silhouette features inside bounding box
         let boxW = max(1, maxX - minX + 1)

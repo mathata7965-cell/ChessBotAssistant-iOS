@@ -14,6 +14,8 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
     private var fetchResult: PHFetchResult<PHAsset>?
     private var lastProcessedAssetID: String?
     private var lastProcessedAsset: PHAsset?
+    private var inFlightAssetID: String?
+    private var inFlightTimestamp: Date = .distantPast
     private var pollTimer: Timer?
 
     override init() {
@@ -54,7 +56,20 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
             options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
             let initial = PHAsset.fetchAssets(with: options)
             self.fetchResult = initial
-            self.lastProcessedAssetID = initial.firstObject?.localIdentifier
+
+            let recentCheckOptions = PHFetchOptions()
+            recentCheckOptions.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+            recentCheckOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            recentCheckOptions.fetchLimit = 1
+            let latestAny = PHAsset.fetchAssets(with: recentCheckOptions).firstObject ?? initial.firstObject
+
+            if let latestCreated = latestAny?.creationDate,
+               Date().timeIntervalSince(latestCreated) <= 180.0 {
+                self.lastProcessedAssetID = nil
+            } else {
+                self.lastProcessedAssetID = latestAny?.localIdentifier
+            }
+
             PHPhotoLibrary.shared().register(self)
             isMonitoring = true
 
@@ -70,12 +85,23 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
             }
             RunLoop.main.add(timer, forMode: .common)
             pollTimer = timer
+
+            if self.lastProcessedAssetID == nil {
+                pollLatestScreenshotAsset()
+            }
+        }
+    }
+
+    func checkForRecentScreenshotNow() {
+        if isMonitoring {
+            pollLatestScreenshotAsset()
         }
     }
 
     func stopMonitoring() {
         pollTimer?.invalidate()
         pollTimer = nil
+        inFlightAssetID = nil
         if isMonitoring {
             PHPhotoLibrary.shared().unregisterChangeObserver(self)
             isMonitoring = false
@@ -92,32 +118,52 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
 
         let latest = PHAsset.fetchAssets(with: options)
         guard let asset = latest.firstObject else { return }
-        guard asset.localIdentifier != lastProcessedAssetID else { return }
         guard let creationDate = asset.creationDate,
-              Date().timeIntervalSince(creationDate) <= 20 else {
+              Date().timeIntervalSince(creationDate) <= 120.0 else {
             return
         }
 
-        lastProcessedAssetID = asset.localIdentifier
-        lastProcessedAsset = asset
-        lastDetectedScreenshotDate = creationDate
-        hasDeletableScreenshot = true
+        enqueueAssetIfReady(asset, creationDate: creationDate)
+    }
+
+    private func enqueueAssetIfReady(_ asset: PHAsset, creationDate: Date) {
+        let assetID = asset.localIdentifier
+        guard assetID != lastProcessedAssetID else { return }
+        if inFlightAssetID == assetID && Date().timeIntervalSince(inFlightTimestamp) < 2.0 {
+            return
+        }
+
+        inFlightAssetID = assetID
+        inFlightTimestamp = Date()
 
         let reqOptions = PHImageRequestOptions()
-        reqOptions.deliveryMode = .highQualityFormat
+        reqOptions.deliveryMode = .opportunistic
+        reqOptions.resizeMode = .fast
         reqOptions.isNetworkAccessAllowed = true
         reqOptions.isSynchronous = false
 
         PHImageManager.default().requestImage(
             for: asset,
-            targetSize: PHImageManagerMaximumSize,
-            contentMode: .default,
+            targetSize: CGSize(width: 960, height: 2080),
+            contentMode: .aspectFit,
             options: reqOptions
         ) { [weak self] image, info in
             let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-            guard !isDegraded, let image else { return }
             Task { @MainActor [weak self] in
-                self?.onNewScreenshot?(image)
+                guard let self else { return }
+                guard let image, image.size.width * image.scale >= 240 else {
+                    if !isDegraded && self.inFlightAssetID == assetID {
+                        self.inFlightAssetID = nil
+                    }
+                    return
+                }
+                guard self.lastProcessedAssetID != assetID else { return }
+                self.lastProcessedAssetID = assetID
+                self.inFlightAssetID = nil
+                self.lastProcessedAsset = asset
+                self.lastDetectedScreenshotDate = creationDate
+                self.hasDeletableScreenshot = true
+                self.onNewScreenshot?(image)
             }
         }
     }
@@ -180,14 +226,8 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
             guard let newestAsset = inserted.first ?? changes.fetchResultAfterChanges.firstObject else { return }
             guard newestAsset.localIdentifier != self.lastProcessedAssetID else { return }
 
-            if let created = newestAsset.creationDate, Date().timeIntervalSince(created) < 15.0 {
-                self.lastProcessedAssetID = newestAsset.localIdentifier
-                self.lastProcessedAsset = newestAsset
-                self.lastDetectedScreenshotDate = created
-                self.hasDeletableScreenshot = true
-                if let image = await self.loadUIImage(from: newestAsset) {
-                    self.onNewScreenshot?(image)
-                }
+            if let created = newestAsset.creationDate, Date().timeIntervalSince(created) <= 120.0 {
+                self.enqueueAssetIfReady(newestAsset, creationDate: created)
             }
         }
     }

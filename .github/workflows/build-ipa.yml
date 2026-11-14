@@ -53,6 +53,11 @@ jobs:
         run: |
           mkdir -p build/ipa/Payload
           cp -R build/Release-iphoneos/ChessBotAssistant.app build/ipa/Payload/
+          for appex in build/ipa/Payload/ChessBotAssistant.app/PlugIns/*.appex; do
+            if [ -d "$appex" ]; then
+              codesign --force --deep --sign - "$appex"
+            fi
+          done
           codesign --force --deep --sign - build/ipa/Payload/ChessBotAssistant.app
           codesign --verify --deep --strict build/ipa/Payload/ChessBotAssistant.app || true
           (cd build/ipa && zip -r ../../ChessBotAssistant.ipa Payload)
