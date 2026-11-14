@@ -12,6 +12,10 @@ final class ChessEngineService: ObservableObject {
     @Published var humanMatchSafetyLockEnabled: Bool = true
     @Published var coachPieceOnlyHintMode: Bool = false
 
+    // 下棋風格與進階戰術視覺化設定
+    @Published var playStyleMode: PlayStyleMode = .engineBest
+    @Published var showOpponentReplyArrow: Bool = true
+
     @Published private(set) var isAnalyzing: Bool = false
     @Published private(set) var currentAnalysis: EngineAnalysisResult?
     @Published private(set) var lastErrorMessage: String?
@@ -55,10 +59,11 @@ final class ChessEngineService: ObservableObject {
         let requestedPV = max(1, min(3, multiPVCount))
         let isZeroNetwork = zeroNetworkIsolationMode
         let allowCloud = useCloudStockfish && !isZeroNetwork
+        let activeStyle = playStyleMode
         let cacheKey = "\(board.positionKey)|d\(requestedDepth)|pv\(requestedPV)"
 
         if allowCloud, let cached = cloudCache[cacheKey] {
-            currentAnalysis = cached
+            currentAnalysis = Self.applyPlayStyle(activeStyle, to: cached, board: board)
             isAnalyzing = false
             return
         }
@@ -83,7 +88,7 @@ final class ChessEngineService: ObservableObject {
             }.value
 
             if Task.isCancelled { return }
-            self.currentAnalysis = localResult
+            self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, to: localResult, board: board)
 
             // 2. If Cloud Stockfish is disabled or Zero-Network Isolation is active, finish strictly offline
             guard allowCloud else {
@@ -100,7 +105,7 @@ final class ChessEngineService: ObservableObject {
             ) {
                 if Task.isCancelled { return }
                 self.cloudCache[cacheKey] = cloudResult
-                self.currentAnalysis = cloudResult
+                self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, to: cloudResult, board: board)
             }
 
             if !Task.isCancelled {
@@ -207,7 +212,12 @@ final class ChessEngineService: ObservableObject {
                     scoreCentipawns: cp,
                     mateInMoves: pv.mate,
                     depth: depth,
-                    sourceLabel: "SF Cloud"
+                    sourceLabel: "SF Cloud",
+                    predictedOpponentReply: Self.extractOpponentReply(
+                        on: board,
+                        firstMove: firstMove,
+                        continuationUCI: uciTokens
+                    )
                 ))
             }
             return (parsedLines, depth, decoded.knodes ?? 0)
@@ -269,11 +279,133 @@ final class ChessEngineService: ObservableObject {
                 scoreCentipawns: cp,
                 mateInMoves: decoded.mate,
                 depth: depth,
-                sourceLabel: "SF16 NNUE"
+                sourceLabel: "SF16 NNUE",
+                predictedOpponentReply: Self.extractOpponentReply(
+                    on: board,
+                    firstMove: bestMove,
+                    continuationUCI: fullUCI
+                )
             )
         } catch {
             return nil
         }
+    }
+
+    nonisolated static func extractOpponentReply(
+        on board: ChessBoardState,
+        firstMove: ChessMove,
+        continuationUCI: [String]
+    ) -> ChessMove? {
+        let afterFirst = board.applying(firstMove)
+        if let secondUCI = continuationUCI.dropFirst().first,
+           let reply = afterFirst.legalMove(uci: secondUCI) {
+            return reply
+        }
+
+        let opponentMoves = afterFirst.legalMoves()
+        guard !opponentMoves.isEmpty else { return nil }
+        var bestReply = opponentMoves[0]
+        var bestVal = -Int.max
+        for move in opponentMoves {
+            let afterOpp = afterFirst.applyingRaw(move)
+            let val = -LocalAlphaBetaEngine.evaluate(board: afterOpp)
+            if val > bestVal {
+                bestVal = val
+                bestReply = move
+            }
+        }
+        return bestReply
+    }
+
+    nonisolated static func applyPlayStyle(
+        _ style: PlayStyleMode,
+        to result: EngineAnalysisResult,
+        board: ChessBoardState
+    ) -> EngineAnalysisResult {
+        guard style != .engineBest, result.lines.count > 1 else {
+            return result
+        }
+
+        let sideMultiplier = board.sideToMove == .white ? 1 : -1
+        let bestCpForSide = (result.lines.first?.scoreCentipawns ?? 0) * sideMultiplier
+        let toleranceCp: Int
+        switch style {
+        case .engineBest: toleranceCp = 0
+        case .humanSafe: toleranceCp = 30
+        case .aggressive: toleranceCp = 45
+        case .defensive: toleranceCp = 35
+        }
+
+        func styleBonus(for line: PVLine) -> Int {
+            let lineCpForSide = line.scoreCentipawns * sideMultiplier
+            if line.mateInMoves == nil && (bestCpForSide - lineCpForSide) > toleranceCp {
+                return -10_000
+            }
+            var bonus = 0
+            let san = line.bestMove.san
+            let move = line.bestMove
+            let after = board.applying(move)
+            let isInDangerAfter = after.isSquareAttacked(row: move.to.row, col: move.to.col, by: board.sideToMove.opposite)
+                && !after.isSquareAttacked(row: move.to.row, col: move.to.col, by: board.sideToMove)
+
+            switch style {
+            case .engineBest:
+                break
+            case .aggressive:
+                if san.contains("#") { bonus += 500 }
+                if san.contains("+") { bonus += 90 }
+                if move.capturedPiece != nil { bonus += 70 }
+                if move.promotion != nil { bonus += 80 }
+            case .defensive:
+                if move.isCastling { bonus += 100 }
+                if !isInDangerAfter { bonus += 60 }
+                if move.capturedPiece == nil && !san.contains("+") { bonus += 35 }
+            case .humanSafe:
+                if !isInDangerAfter { bonus += 40 }
+                if move.isCastling { bonus += 60 }
+                // Prefer natural developing/central moves slightly over obscure computer pawn pushes
+                if let p = board.piece(at: move.from), p.type == .knight || p.type == .bishop {
+                    bonus += 30
+                }
+            }
+            return bonus
+        }
+
+        let ranked = result.lines.sorted { a, b in
+            let sa = styleBonus(for: a)
+            let sb = styleBonus(for: b)
+            if sa != sb { return sa > sb }
+            return a.scoreCentipawns * sideMultiplier > b.scoreCentipawns * sideMultiplier
+        }
+
+        let reindexed: [PVLine] = ranked.enumerated().map { idx, line in
+            var moveCopy = line.bestMove
+            if idx == 0 && (moveCopy.tacticalTag == nil || moveCopy.tacticalTag?.isEmpty == true) {
+                moveCopy.tacticalTag = style.displayName
+            }
+            return PVLine(
+                multipvIndex: idx + 1,
+                bestMove: moveCopy,
+                continuationSAN: line.continuationSAN,
+                continuationUCI: line.continuationUCI,
+                scoreCentipawns: line.scoreCentipawns,
+                mateInMoves: line.mateInMoves,
+                depth: line.depth,
+                sourceLabel: "\(line.sourceLabel)•\(style.displayName)",
+                predictedOpponentReply: line.predictedOpponentReply
+            )
+        }
+
+        return EngineAnalysisResult(
+            fen: result.fen,
+            sideToMove: result.sideToMove,
+            lines: reindexed,
+            depthReached: result.depthReached,
+            isCloudVerified: result.isCloudVerified,
+            engineSource: "\(result.engineSource)（\(style.displayName)）",
+            nodesSearched: result.nodesSearched,
+            timestamp: result.timestamp
+        )
     }
 
     nonisolated static func convertUCILineToSAN(startBoard: ChessBoardState, uciMoves: [String]) -> [String] {
@@ -554,7 +686,12 @@ private enum LocalAlphaBetaEngine {
                 scoreCentipawns: whiteCP,
                 mateInMoves: mateMoves,
                 depth: completedDepth,
-                sourceLabel: "本地 D\(completedDepth)"
+                sourceLabel: "本地 D\(completedDepth)",
+                predictedOpponentReply: ChessEngineService.extractOpponentReply(
+                    on: board,
+                    firstMove: entry.move,
+                    continuationUCI: uciLine
+                )
             ))
         }
 
@@ -700,7 +837,7 @@ private enum LocalAlphaBetaEngine {
     }
 
     /// PeSTO Tapered Evaluation from `board.sideToMove` perspective
-    private static func evaluate(board: ChessBoardState) -> Int {
+    fileprivate static func evaluate(board: ChessBoardState) -> Int {
         var mgWhite = 0, mgBlack = 0
         var egWhite = 0, egBlack = 0
         var phase = 0

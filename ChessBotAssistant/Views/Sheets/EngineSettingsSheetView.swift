@@ -39,6 +39,47 @@ struct EngineSettingsSheetView: View {
                     .disabled(!viewModel.screenshotMonitor.hasDeletableScreenshot)
                 }
 
+                Section("🧭 陣營判斷、風格與進階戰術設定") {
+                    Picker("我方陣營偵測", selection: Binding(
+                        get: { viewModel.campDetectionMode },
+                        set: { newMode in
+                            if viewModel.campDetectionMode != newMode {
+                                viewModel.setCampDetectionMode(newMode)
+                            }
+                        }
+                    )) {
+                        ForEach(CampDetectionMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+
+                    Text("判定依據：\(viewModel.detectedCampReason)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Toggle("掃描後永遠分析我方回合", isOn: Binding(
+                        get: { viewModel.alwaysAnalyzeMyCampTurn },
+                        set: { newVal in
+                            if viewModel.alwaysAnalyzeMyCampTurn != newVal {
+                                viewModel.toggleAlwaysAnalyzeMyCampTurn()
+                            }
+                        }
+                    ))
+                    .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
+
+                    Picker("下棋風格 (防封擬人化)", selection: $engineService.playStyleMode) {
+                        ForEach(PlayStyleMode.allCases) { style in
+                            Label(style.displayName, systemImage: style.icon).tag(style)
+                        }
+                    }
+
+                    Toggle("🔮 顯示對手回應預測箭頭（紅色虛線）", isOn: $engineService.showOpponentReplyArrow)
+                        .tint(.red)
+
+                    Toggle("🔊 掃描後中文語音播報最佳步", isOn: $viewModel.voiceAnnounceEnabled)
+                        .tint(.cyan)
+                }
+
                 Section("引擎思考設定") {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {

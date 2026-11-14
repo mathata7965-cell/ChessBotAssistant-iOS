@@ -616,4 +616,271 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
         }
         return (current, history, moveSANs)
     }
+
+    // MARK: - Tactical Radar, Material Balance & ECO Opening Recognition
+
+    func buildTacticalRadar(for camp: PieceColor, moveHistorySAN: [String]) -> TacticalRadarReport {
+        let standardCounts: [(type: PieceType, count: Int)] = [
+            (.queen, 1), (.rook, 2), (.bishop, 2), (.knight, 2), (.pawn, 8)
+        ]
+
+        var whiteCounts: [PieceType: Int] = [:]
+        var blackCounts: [PieceType: Int] = [:]
+        var whiteMaterial = 0
+        var blackMaterial = 0
+        var totalNonKingPieces = 0
+
+        let enemy = camp.opposite
+        var hangingFriendlySquares: [BoardSquare] = []
+        var hangingDescriptions: [String] = []
+        var freeTargetDescriptions: [String] = []
+
+        for r in 0..<8 {
+            for c in 0..<8 {
+                guard let piece = squares[r][c] else { continue }
+                if piece.color == .white {
+                    whiteCounts[piece.type, default: 0] += 1
+                    whiteMaterial += piece.baseValue
+                } else {
+                    blackCounts[piece.type, default: 0] += 1
+                    blackMaterial += piece.baseValue
+                }
+                if piece.type != .king {
+                    totalNonKingPieces += 1
+                }
+
+                let sq = BoardSquare(row: r, col: c)
+                if piece.type != .king {
+                    if piece.color == camp {
+                        if isSquareAttacked(row: r, col: c, by: enemy) {
+                            let isDefended = isSquareAttacked(row: r, col: c, by: camp)
+                            let minEnemyVal = lowestAttackerValue(row: r, col: c, by: enemy)
+                            if !isDefended || (minEnemyVal != nil && minEnemyVal! < piece.baseValue) {
+                                hangingFriendlySquares.append(sq)
+                                let reason = !isDefended ? "無保護受攻" : "被低價值子威脅"
+                                hangingDescriptions.append("\(piece.type.displayName)\(sq.algebraic)(\(reason))")
+                            }
+                        }
+                    } else {
+                        if isSquareAttacked(row: r, col: c, by: camp) {
+                            let isEnemyDefended = isSquareAttacked(row: r, col: c, by: enemy)
+                            let minMyVal = lowestAttackerValue(row: r, col: c, by: camp)
+                            if !isEnemyDefended || (minMyVal != nil && minMyVal! < piece.baseValue) {
+                                freeTargetDescriptions.append("\(piece.type.displayName)\(sq.algebraic)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let whitePawns = Double(whiteMaterial - blackMaterial) / 100.0
+        let campPawns = camp == .white ? whitePawns : -whitePawns
+        let materialDiff = Int(campPawns.rounded())
+
+        var missingWhite: [ChessPiece] = []
+        var missingBlack: [ChessPiece] = []
+        for entry in standardCounts {
+            let wDiff = max(0, entry.count - (whiteCounts[entry.type] ?? 0))
+            for _ in 0..<wDiff {
+                missingWhite.append(ChessPiece(color: .white, type: entry.type))
+            }
+            let bDiff = max(0, entry.count - (blackCounts[entry.type] ?? 0))
+            for _ in 0..<bDiff {
+                missingBlack.append(ChessPiece(color: .black, type: entry.type))
+            }
+        }
+
+        let capturedByUser = camp == .white ? missingBlack : missingWhite
+        let capturedByOpponent = camp == .white ? missingWhite : missingBlack
+
+        let openingName = detectOpeningName(moveHistorySAN: moveHistorySAN, totalNonKingPieces: totalNonKingPieces)
+
+        let inCheck = isKingInCheck(camp)
+        let tensionCount = hangingFriendlySquares.count + freeTargetDescriptions.count
+        let thinkRange: String
+        if inCheck || tensionCount >= 2 {
+            thinkRange = "4~8 秒"
+        } else if totalNonKingPieces >= 28 {
+            thinkRange = "1.5~3.5 秒"
+        } else if totalNonKingPieces <= 10 {
+            thinkRange = "5~9 秒"
+        } else {
+            thinkRange = "3~5 秒"
+        }
+
+        return TacticalRadarReport(
+            materialDiffForPerspective: materialDiff,
+            capturedByUser: capturedByUser,
+            capturedByOpponent: capturedByOpponent,
+            hangingFriendlySquares: hangingFriendlySquares,
+            hangingDescriptions: Array(hangingDescriptions.prefix(3)),
+            freeTargetDescriptions: Array(freeTargetDescriptions.prefix(3)),
+            openingName: openingName,
+            recommendedThinkRange: thinkRange
+        )
+    }
+
+    private func lowestAttackerValue(row: Int, col: Int, by attacker: PieceColor) -> Int? {
+        var best: Int? = nil
+        func record(_ value: Int) {
+            if let cur = best { best = min(cur, value) } else { best = value }
+        }
+
+        let pawnSourceRow = attacker == .white ? row + 1 : row - 1
+        if pawnSourceRow >= 0 && pawnSourceRow < 8 {
+            for dc in [-1, 1] {
+                let c = col + dc
+                if c >= 0 && c < 8, let p = squares[pawnSourceRow][c], p.color == attacker && p.type == .pawn {
+                    record(p.baseValue)
+                }
+            }
+        }
+
+        let knightOffsets = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+        for (dr, dc) in knightOffsets {
+            let r = row + dr, c = col + dc
+            if r >= 0 && r < 8 && c >= 0 && c < 8,
+               let p = squares[r][c], p.color == attacker && p.type == .knight {
+                record(p.baseValue)
+            }
+        }
+
+        let diagDirs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        for (dr, dc) in diagDirs {
+            var r = row + dr, c = col + dc
+            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+                if let p = squares[r][c] {
+                    if p.color == attacker && (p.type == .bishop || p.type == .queen) {
+                        record(p.baseValue)
+                    }
+                    break
+                }
+                r += dr; c += dc
+            }
+        }
+
+        let orthoDirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        for (dr, dc) in orthoDirs {
+            var r = row + dr, c = col + dc
+            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+                if let p = squares[r][c] {
+                    if p.color == attacker && (p.type == .rook || p.type == .queen) {
+                        record(p.baseValue)
+                    }
+                    break
+                }
+                r += dr; c += dc
+            }
+        }
+
+        for dr in -1...1 {
+            for dc in -1...1 where !(dr == 0 && dc == 0) {
+                let r = row + dr, c = col + dc
+                if r >= 0 && r < 8 && c >= 0 && c < 8,
+                   let p = squares[r][c], p.color == attacker && p.type == .king {
+                    record(p.baseValue)
+                }
+            }
+        }
+        return best
+    }
+
+    func detectOpeningName(moveHistorySAN: [String], totalNonKingPieces: Int? = nil) -> String {
+        let joined = moveHistorySAN.prefix(8).joined(separator: " ")
+        if !joined.isEmpty {
+            let sanRules: [(prefix: String, name: String)] = [
+                ("e4 e5 Nf3 Nc6 Bb5", "西班牙開局 (Ruy Lopez)"),
+                ("e4 e5 Nf3 Nc6 Bc4 Bc5", "義大利開局・吉奧科平靜 (Giuoco Piano)"),
+                ("e4 e5 Nf3 Nc6 Bc4 Nf6", "雙馬防禦 (Two Knights Defense)"),
+                ("e4 e5 Nf3 Nc6 Bc4", "義大利開局 (Italian Game)"),
+                ("e4 e5 Nf3 Nc6 d4", "蘇格蘭開局 (Scotch Game)"),
+                ("e4 e5 Nf3 Nc6 Nc3 Nf6", "四馬開局 (Four Knights Game)"),
+                ("e4 e5 Nf3 Nf6", "彼得羅夫防禦 (Petrov's Defense)"),
+                ("e4 e5 Nf3 d6", "菲利道爾防禦 (Philidor Defense)"),
+                ("e4 e5 Nc3", "維也納開局 (Vienna Game)"),
+                ("e4 e5 f4", "王翼棄兵 (King's Gambit)"),
+                ("e4 e5 d4", "中心開局 (Center Game)"),
+                ("e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6", "西西里納伊道夫 (Sicilian Najdorf)"),
+                ("e4 c5 Nf3 Nc6 Bb5", "西西里羅索里莫 (Sicilian Rossolimo)"),
+                ("e4 c5 c3", "西西里阿拉平 (Sicilian Alapin)"),
+                ("e4 c5", "西西里防禦 (Sicilian Defense)"),
+                ("e4 e6 d4 d5", "法蘭西防禦 (French Defense)"),
+                ("e4 e6", "法蘭西防禦 (French Defense)"),
+                ("e4 c6 d4 d5", "卡羅-康防禦 (Caro-Kann Defense)"),
+                ("e4 c6", "卡羅-康防禦 (Caro-Kann Defense)"),
+                ("e4 d5", "斯堪地那維亞防禦 (Scandinavian)"),
+                ("e4 d6 d4 Nf6 Nc3 g6", "皮爾茨防禦 (Pirc Defense)"),
+                ("e4 g6", "現代防禦 (Modern Defense)"),
+                ("d4 d5 c4 e6", "拒絕后翼棄兵 (QGD)"),
+                ("d4 d5 c4 c6", "斯拉夫防禦 (Slav Defense)"),
+                ("d4 d5 c4 dxc4", "接受后翼棄兵 (QGA)"),
+                ("d4 d5 c4", "后翼棄兵 (Queen's Gambit)"),
+                ("d4 d5 Bf4", "倫敦體系 (London System)"),
+                ("d4 Nf6 c4 g6 Nc3 Bg7", "王翼印度防禦 (King's Indian)"),
+                ("d4 Nf6 c4 g6 Nc3 d5", "格林菲爾德防禦 (Grunfeld)"),
+                ("d4 Nf6 c4 e6 Nc3 Bb4", "尼姆佐-印度防禦 (Nimzo-Indian)"),
+                ("d4 Nf6 c4 e6 Nf3 b6", "后翼印度防禦 (Queen's Indian)"),
+                ("d4 Nf6 c4 e6 g3", "加泰隆尼亞開局 (Catalan)"),
+                ("d4 Nf6 c4 c5", "貝諾尼防禦 (Benoni)"),
+                ("d4 f5", "荷蘭防禦 (Dutch Defense)"),
+                ("c4", "英國式開局 (English Opening)"),
+                ("Nf3", "雷蒂開局 (Reti Opening)"),
+                ("f4", "柏德開局 (Bird's Opening)"),
+                ("b3", "尼姆佐-拉森攻擊 (Nimzo-Larsen)"),
+                ("e4", "王前兵開局 (King's Pawn)"),
+                ("d4", "后前兵開局 (Queen's Pawn)")
+            ]
+            for rule in sanRules where joined.hasPrefix(rule.prefix) {
+                return rule.name
+            }
+        }
+
+        // Geometric board signature detection (works directly from screenshots without SAN history)
+        func has(_ alg: String, _ color: PieceColor, _ type: PieceType) -> Bool {
+            guard let sq = BoardSquare(algebraic: alg), let p = squares[sq.row][sq.col] else { return false }
+            return p.color == color && p.type == type
+        }
+
+        if self == .startingPosition {
+            return "標準開局預備 (Starting Position)"
+        }
+        if has("e4", .white, .pawn) {
+            if has("c5", .black, .pawn) {
+                if has("f3", .white, .knight) && has("d6", .black, .pawn) { return "西西里防禦・主線 (Sicilian)" }
+                return "西西里防禦 (Sicilian Defense)"
+            }
+            if has("e5", .black, .pawn) {
+                if has("b5", .white, .bishop) && has("c6", .black, .knight) { return "西班牙開局 (Ruy Lopez)" }
+                if has("c4", .white, .bishop) && has("f3", .white, .knight) { return "義大利開局 (Italian Game)" }
+                if has("f3", .white, .knight) && has("f6", .black, .knight) && !has("c6", .black, .knight) { return "彼得羅夫防禦 (Petrov)" }
+                return "開放性開局 (Open Game 1.e4 e5)"
+            }
+            if has("c6", .black, .pawn) { return "卡羅-康防禦 (Caro-Kann)" }
+            if has("e6", .black, .pawn) && !has("e5", .black, .pawn) { return "法蘭西防禦 (French Defense)" }
+            if has("d5", .black, .pawn) && has("d4", .white, .pawn) == false { return "斯堪地那維亞防禦 (Scandinavian)" }
+        }
+        if has("d4", .white, .pawn) {
+            if has("f4", .white, .bishop) && has("e3", .white, .pawn) { return "倫敦體系 (London System)" }
+            if has("d5", .black, .pawn) && has("c4", .white, .pawn) {
+                if has("c6", .black, .pawn) { return "斯拉夫防禦 (Slav Defense)" }
+                if has("e6", .black, .pawn) { return "拒絕后翼棄兵 (QGD)" }
+                return "后翼棄兵 (Queen's Gambit)"
+            }
+            if has("g6", .black, .pawn) && has("g7", .black, .bishop) { return "王翼印度防禦 (King's Indian)" }
+            if has("d5", .black, .pawn) && has("f4", .white, .bishop) { return "倫敦體系 (London System)" }
+            if has("f5", .black, .pawn) { return "荷蘭防禦 (Dutch Defense)" }
+        }
+        if has("c4", .white, .pawn) && !has("d4", .white, .pawn) {
+            return "英國式開局 (English Opening)"
+        }
+
+        let count = totalNonKingPieces ?? squares.flatMap { $0 }.compactMap { $0 }.filter { $0.type != .king }.count
+        if count <= 10 {
+            return "殘局精算階段 (Endgame)"
+        } else if count >= 26 {
+            return "開局發展階段 (Opening)"
+        }
+        return "中局戰術交鋒 (Middlegame)"
+    }
 }

@@ -34,6 +34,11 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var latestCoachPieceOnlyMode: Bool = false
     private var latestIsSafetyLocked: Bool = false
     private var latestZeroNetworkMode: Bool = true
+    private var latestShowOpponentReplyArrow: Bool = true
+    private var latestCampReason: String = ""
+    private var latestOpeningName: String = ""
+    private var latestThinkRange: String = ""
+    private var latestHangingCount: Int = 0
 
     override init() {
         super.init()
@@ -94,7 +99,12 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         autoSyncActive: Bool,
         coachPieceOnlyMode: Bool,
         isSafetyLocked: Bool,
-        zeroNetworkMode: Bool
+        zeroNetworkMode: Bool,
+        showOpponentReplyArrow: Bool = true,
+        campReason: String = "",
+        openingName: String = "",
+        thinkRange: String = "",
+        hangingCount: Int = 0
     ) {
         self.latestBoard = board
         self.latestAnalysis = analysis
@@ -104,6 +114,11 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         self.latestCoachPieceOnlyMode = coachPieceOnlyMode
         self.latestIsSafetyLocked = isSafetyLocked
         self.latestZeroNetworkMode = zeroNetworkMode
+        self.latestShowOpponentReplyArrow = showOpponentReplyArrow
+        self.latestCampReason = campReason
+        self.latestOpeningName = openingName
+        self.latestThinkRange = thinkRange
+        self.latestHangingCount = hangingCount
         pushCurrentFrame()
     }
 
@@ -438,6 +453,21 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                         cellSize: cellSize,
                         color: color,
                         lineWidth: strokeW,
+                        isDashed: false,
+                        in: cg
+                    )
+                }
+
+                if latestShowOpponentReplyArrow,
+                   let reply = lines.first?.predictedOpponentReply {
+                    drawArrow(
+                        from: reply.from,
+                        to: reply.to,
+                        boardOrigin: boardOrigin,
+                        cellSize: cellSize,
+                        color: UIColor(red: 1.0, green: 0.34, blue: 0.38, alpha: 0.90),
+                        lineWidth: 5.5,
+                        isDashed: true,
                         in: cg
                     )
                 }
@@ -487,11 +517,14 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                     withAttributes: headerAttr
                 )
 
-                // Side to move & primary eval
-                let turnText = "輪到 \(latestBoard.sideToMove.displayName)"
+                // Camp badge + turn indicator
+                let campShort = latestPerspective == .white ? "我執白" : "我執黑"
+                let turnText = "\(campShort) • 輪到\(latestBoard.sideToMove.displayName)"
                 let turnAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 14.5, weight: .semibold),
-                    .foregroundColor: UIColor(white: 0.85, alpha: 1.0)
+                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                    .foregroundColor: latestPerspective == .white
+                        ? UIColor.white
+                        : UIColor(red: 0.56, green: 0.85, blue: 1.0, alpha: 1.0)
                 ]
                 NSString(string: turnText).draw(at: CGPoint(x: panelX, y: 72), withAttributes: turnAttr)
 
@@ -578,12 +611,15 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             }
 
             // Footer
-            let netLabel = latestZeroNetworkMode ? "🔒 零連網隔離" : "🛡️ 防誤觸保護"
-            let syncLabel = latestAutoSyncActive ? "📸 同步中" : "⏸ 手動"
-            let footerText = "\(netLabel) • \(syncLabel)"
+            let netLabel = latestZeroNetworkMode ? "🔒離線" : "🛡️保護"
+            let syncLabel = latestAutoSyncActive ? "📸同步" : "⏸手動"
+            let extraLabel = latestHangingCount > 0
+                ? "⚠️懸子\(latestHangingCount)"
+                : (latestThinkRange.isEmpty ? "" : "⏱\(latestThinkRange)")
+            let footerText = extraLabel.isEmpty ? "\(netLabel) • \(syncLabel)" : "\(netLabel) • \(syncLabel) • \(extraLabel)"
             let footerAttr: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 11.5, weight: .semibold),
-                .foregroundColor: latestIsSafetyLocked
+                .foregroundColor: latestIsSafetyLocked || latestHangingCount > 0
                     ? UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
                     : (latestAutoSyncActive
                         ? UIColor(red: 0.45, green: 0.90, blue: 0.58, alpha: 1.0)
@@ -591,8 +627,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             ]
             NSString(string: footerText).draw(at: CGPoint(x: panelX, y: 422), withAttributes: footerAttr)
 
-            // Bottom status strip / PiP button legend
-            let bottomStatusText = pipBannerText ?? "⏯掃描 ⏩走步 ⏪悔步"
+            // Bottom status strip / PiP button legend / opening name
+            let openingBadge = latestOpeningName.isEmpty ? "⏯掃描 ⏩走步 ⏪悔步" : "📖 \(latestOpeningName) • ⏯掃描"
+            let bottomStatusText = pipBannerText ?? openingBadge
             let statusStripRect = CGRect(x: 48, y: 454, width: 648, height: 22)
             if pipBannerText != nil {
                 UIColor(red: 0.16, green: 0.34, blue: 0.22, alpha: 0.95).setFill()
@@ -637,6 +674,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         cellSize: CGFloat,
         color: UIColor,
         lineWidth: CGFloat,
+        isDashed: Bool = false,
         in cg: CGContext
     ) {
         let startScreenCol = latestPerspective == .white ? from.col : (7 - from.col)
@@ -668,9 +706,15 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         color.setFill()
         cg.setLineWidth(lineWidth)
         cg.setLineCap(.round)
+        if isDashed {
+            cg.setLineDash(phase: 0, lengths: [lineWidth * 1.4, lineWidth * 1.2])
+        }
         cg.move(to: p0)
         cg.addLine(to: shaftEnd)
         cg.strokePath()
+        if isDashed {
+            cg.setLineDash(phase: 0, lengths: [])
+        }
 
         let perpX = -uy
         let perpY = ux

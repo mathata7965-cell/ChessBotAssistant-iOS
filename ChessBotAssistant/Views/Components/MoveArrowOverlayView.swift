@@ -7,6 +7,7 @@ struct MoveArrowOverlayView: View {
     let highlightedPVIndex: Int?
     var coachPieceOnlyMode: Bool = false
     var isSafetyLocked: Bool = false
+    var showOpponentReplyArrow: Bool = true
 
     private func arrowColor(for rank: Int) -> Color {
         switch rank {
@@ -44,8 +45,27 @@ struct MoveArrowOverlayView: View {
                             to: p1,
                             color: color,
                             lineWidth: lineWidth,
-                            rankBadge: pvLines.count > 1 ? "\(line.multipvIndex)" : nil
+                            rankBadge: pvLines.count > 1 ? "\(line.multipvIndex)" : nil,
+                            isDashed: false
                         )
+                    }
+
+                    // Draw dashed crimson arrow for predicted opponent reply on highlighted/primary PV line
+                    if showOpponentReplyArrow {
+                        let activeLine = pvLines.first(where: { $0.multipvIndex == (highlightedPVIndex ?? 1) }) ?? pvLines.first
+                        if let reply = activeLine?.predictedOpponentReply {
+                            let rp0 = centerPoint(for: reply.from, cellSize: cell)
+                            let rp1 = centerPoint(for: reply.to, cellSize: cell)
+                            drawArrow(
+                                in: &context,
+                                from: rp0,
+                                to: rp1,
+                                color: Color(red: 1.0, green: 0.32, blue: 0.36).opacity(0.85),
+                                lineWidth: max(4.5, cell * 0.13),
+                                rankBadge: "敵",
+                                isDashed: true
+                            )
+                        }
                     }
                 }
                 .allowsHitTesting(false)
@@ -68,7 +88,8 @@ struct MoveArrowOverlayView: View {
         to p1: CGPoint,
         color: Color,
         lineWidth: CGFloat,
-        rankBadge: String?
+        rankBadge: String?,
+        isDashed: Bool = false
     ) {
         let dx = p1.x - p0.x
         let dy = p1.y - p0.y
@@ -89,7 +110,12 @@ struct MoveArrowOverlayView: View {
         context.stroke(
             shaft,
             with: .color(color),
-            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
+            style: StrokeStyle(
+                lineWidth: lineWidth,
+                lineCap: .round,
+                lineJoin: .round,
+                dash: isDashed ? [max(5, lineWidth * 1.15), max(4, lineWidth * 0.95)] : []
+            )
         )
 
         let perpX = -uy

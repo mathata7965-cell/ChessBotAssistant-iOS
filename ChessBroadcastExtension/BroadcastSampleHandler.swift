@@ -14,6 +14,8 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
         let sideToMove: String
         let confidence: Double
         let notes: String
+        let campConfidence: Double?
+        let campDetectionReason: String?
         let timestamp: Double
     }
 
@@ -93,6 +95,8 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
                 sideToMove: result.boardState.sideToMove.rawValue,
                 confidence: result.confidence,
                 notes: result.notes,
+                campConfidence: result.campConfidence,
+                campDetectionReason: result.campDetectionReason,
                 timestamp: Date().timeIntervalSince1970
             )
             sendPayloadOverUDP(payload)

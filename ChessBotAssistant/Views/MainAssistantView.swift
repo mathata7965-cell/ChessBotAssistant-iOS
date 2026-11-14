@@ -57,6 +57,46 @@ struct MainAssistantView: View {
                                     viewModel.engineService.coachPieceOnlyHintMode.toggle()
                                 }
 
+                                protectionPill(
+                                    title: "🧭 \(viewModel.campDetectionMode.displayName)(\(viewModel.perspective == .white ? "白" : "黑"))",
+                                    isActive: true,
+                                    activeColor: .teal
+                                ) {
+                                    viewModel.cycleCampDetectionMode()
+                                }
+
+                                protectionPill(
+                                    title: viewModel.alwaysAnalyzeMyCampTurn ? "♟ 鎖我方回合" : "♟ 依畫面輪次",
+                                    isActive: viewModel.alwaysAnalyzeMyCampTurn,
+                                    activeColor: .indigo
+                                ) {
+                                    viewModel.toggleAlwaysAnalyzeMyCampTurn()
+                                }
+
+                                protectionPill(
+                                    title: "🎭 \(viewModel.engineService.playStyleMode.displayName)",
+                                    isActive: viewModel.engineService.playStyleMode != .engineBest,
+                                    activeColor: .purple
+                                ) {
+                                    viewModel.cyclePlayStyleMode()
+                                }
+
+                                protectionPill(
+                                    title: viewModel.engineService.showOpponentReplyArrow ? "🔮 敵步預測:開" : "🔮 敵步預測:關",
+                                    isActive: viewModel.engineService.showOpponentReplyArrow,
+                                    activeColor: .red
+                                ) {
+                                    viewModel.engineService.showOpponentReplyArrow.toggle()
+                                }
+
+                                protectionPill(
+                                    title: viewModel.voiceAnnounceEnabled ? "🔊 語音播報:開" : "🔊 語音播報:關",
+                                    isActive: viewModel.voiceAnnounceEnabled,
+                                    activeColor: .mint
+                                ) {
+                                    viewModel.voiceAnnounceEnabled.toggle()
+                                }
+
                                 if viewModel.screenshotMonitor.hasDeletableScreenshot {
                                     protectionPill(
                                         title: "🧹 刪暫存截圖",
@@ -141,6 +181,8 @@ struct MainAssistantView: View {
                                 highlightedPVIndex: highlightedPVIndex,
                                 coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
                                 isSafetyLocked: viewModel.isFairPlaySafetyLocked,
+                                hangingSquares: Set(viewModel.tacticalRadar.hangingFriendlySquares),
+                                showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
                                 onTapSquare: { square in
                                     viewModel.tapSquare(square)
                                 }
@@ -228,6 +270,8 @@ struct MainAssistantView: View {
                             boardState: viewModel.boardState,
                             coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
                             isSafetyLocked: viewModel.isFairPlaySafetyLocked,
+                            showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
+                            recommendedThinkRange: viewModel.tacticalRadar.recommendedThinkRange,
                             onSelectPV: { line in
                                 highlightedPVIndex = line.multipvIndex
                             },
@@ -235,6 +279,9 @@ struct MainAssistantView: View {
                                 viewModel.playPVLine(line)
                             }
                         )
+
+                        // 4.5 Opening Detection, Tactical Radar & Eval Sparkline
+                        tacticalRadarAndSparklineCard
 
                         // 5. Inline Depth, Multi-PV & Auto-Hint Controls
                         VStack(spacing: 10) {
@@ -523,6 +570,173 @@ struct MainAssistantView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.cyan.opacity(0.22), lineWidth: 1)
         )
+    }
+
+    private var tacticalRadarAndSparklineCard: some View {
+        let radar = viewModel.tacticalRadar
+        let diff = radar.materialDiffForPerspective
+        let diffText = diff == 0 ? "均勢 ±0" : (diff > 0 ? "子力 +\(diff)" : "子力 \(diff)")
+        let diffColor: Color = diff > 0 ? accentGreen : (diff < 0 ? .orange : Color(white: 0.78))
+        let points = viewModel.evalHistoryWhitePct
+        let latestWhitePct = points.last ?? 50.0
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Label(radar.openingName, systemImage: "book.closed.fill")
+                    .font(.caption.bold())
+                    .foregroundColor(.cyan)
+                    .lineLimit(1)
+
+                Spacer()
+
+                if let quality = viewModel.lastMoveQualityBadge {
+                    Text(quality)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(qualityColor(for: quality))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(qualityColor(for: quality).opacity(0.16))
+                        .clipShape(Capsule())
+                }
+
+                Text(diffText)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(diffColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(diffColor.opacity(0.16))
+                    .clipShape(Capsule())
+            }
+
+            HStack(spacing: 6) {
+                Text("🧭 \(viewModel.detectedCampReason)")
+                    .font(.caption2)
+                    .foregroundColor(Color(white: 0.78))
+                    .lineLimit(1)
+                Spacer()
+                Text("⏱ 建議思考 \(radar.recommendedThinkRange)")
+                    .font(.caption2.bold())
+                    .foregroundColor(.yellow.opacity(0.92))
+            }
+
+            if !radar.capturedByUser.isEmpty || !radar.capturedByOpponent.isEmpty {
+                HStack(spacing: 12) {
+                    if !radar.capturedByUser.isEmpty {
+                        Text("我吃: \(radar.capturedByUser.map(pieceGlyph).joined())")
+                            .font(.caption2)
+                            .foregroundColor(accentGreen)
+                    }
+                    if !radar.capturedByOpponent.isEmpty {
+                        Text("敵吃: \(radar.capturedByOpponent.map(pieceGlyph).joined())")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+
+            if !radar.hangingDescriptions.isEmpty {
+                Text("⚠️ 懸空危險：\(radar.hangingDescriptions.joined(separator: "、"))")
+                    .font(.caption2.bold())
+                    .foregroundColor(.red.opacity(0.95))
+            }
+
+            if !radar.freeTargetDescriptions.isEmpty {
+                Text("🎯 白吃目標：\(radar.freeTargetDescriptions.joined(separator: "、"))")
+                    .font(.caption2.bold())
+                    .foregroundColor(accentGreen)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("📊 白方勝率走勢（近 \(points.count) 步）")
+                        .font(.caption2)
+                        .foregroundColor(Color(white: 0.70))
+                    Spacer()
+                    Text("白 \(Int(latestWhitePct.rounded()))% / 黑 \(100 - Int(latestWhitePct.rounded()))%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.white)
+                }
+
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    let h = geo.size.height
+                    ZStack {
+                        // 50% baseline
+                        Path { path in
+                            path.move(to: CGPoint(x: 0, y: h * 0.5))
+                            path.addLine(to: CGPoint(x: w, y: h * 0.5))
+                        }
+                        .stroke(Color.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+                        if points.count >= 2 {
+                            Path { path in
+                                for (idx, val) in points.enumerated() {
+                                    let x = w * CGFloat(idx) / CGFloat(max(1, points.count - 1))
+                                    let y = h * (1.0 - CGFloat(min(100.0, max(0.0, val))) / 100.0)
+                                    if idx == 0 {
+                                        path.move(to: CGPoint(x: x, y: y))
+                                    } else {
+                                        path.addLine(to: CGPoint(x: x, y: y))
+                                    }
+                                }
+                            }
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.cyan, accentGreen],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                ),
+                                style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                            )
+                        } else if let onlyVal = points.first {
+                            let y = h * (1.0 - CGFloat(min(100.0, max(0.0, onlyVal))) / 100.0)
+                            Circle()
+                                .fill(Color.cyan)
+                                .frame(width: 6, height: 6)
+                                .position(x: w * 0.5, y: y)
+                        }
+                    }
+                }
+                .frame(height: 30)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(red: 0.11, green: 0.14, blue: 0.18))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.cyan.opacity(0.20), lineWidth: 1)
+        )
+    }
+
+    private func pieceGlyph(_ piece: ChessPiece) -> String {
+        switch (piece.color, piece.type) {
+        case (.white, .king): return "♔"
+        case (.white, .queen): return "♕"
+        case (.white, .rook): return "♖"
+        case (.white, .bishop): return "♗"
+        case (.white, .knight): return "♘"
+        case (.white, .pawn): return "♙"
+        case (.black, .king): return "♚"
+        case (.black, .queen): return "♛"
+        case (.black, .rook): return "♜"
+        case (.black, .bishop): return "♝"
+        case (.black, .knight): return "♞"
+        case (.black, .pawn): return "♟"
+        }
+    }
+
+    private func qualityColor(for badge: String) -> Color {
+        if badge.hasPrefix("💎") { return .cyan }
+        if badge.hasPrefix("✅") { return accentGreen }
+        if badge.hasPrefix("👍") { return .blue }
+        if badge.hasPrefix("⚠️") { return .orange }
+        return .red
     }
 
     private func protectionPill(

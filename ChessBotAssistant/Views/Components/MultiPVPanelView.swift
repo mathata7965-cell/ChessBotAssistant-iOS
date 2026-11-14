@@ -8,6 +8,8 @@ struct MultiPVPanelView: View {
     var boardState: ChessBoardState? = nil
     var coachPieceOnlyMode: Bool = false
     var isSafetyLocked: Bool = false
+    var showOpponentReplyArrow: Bool = true
+    var recommendedThinkRange: String? = nil
     let onSelectPV: (PVLine) -> Void
     let onPlayPV: (PVLine) -> Void
 
@@ -148,6 +150,23 @@ struct MultiPVPanelView: View {
                                     .font(.system(size: 11.5, weight: .regular, design: .monospaced))
                                     .foregroundColor(Color(white: 0.65))
                                     .lineLimit(1)
+
+                                if line.multipvIndex == 1 && !coachPieceOnlyMode {
+                                    HStack(spacing: 8) {
+                                        if showOpponentReplyArrow, let reply = line.predictedOpponentReply {
+                                            Text("🔮 預測對手回應: \(reply.san) (\(reply.coordinateDisplay))")
+                                                .font(.system(size: 10.5, weight: .semibold))
+                                                .foregroundColor(Color(red: 1.0, green: 0.56, blue: 0.58))
+                                                .lineLimit(1)
+                                        }
+                                        if let thinkRange = recommendedThinkRange, !thinkRange.isEmpty {
+                                            Text("⏱️ 建議思考 \(thinkRange)")
+                                                .font(.system(size: 10.5, weight: .medium))
+                                                .foregroundColor(Color(red: 0.98, green: 0.80, blue: 0.35))
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                }
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {

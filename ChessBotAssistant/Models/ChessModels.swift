@@ -268,6 +268,60 @@ struct ChessMove: Identifiable, Codable, Equatable, Hashable, Sendable {
     }
 }
 
+enum CampDetectionMode: String, CaseIterable, Identifiable, Sendable {
+    case auto = "auto"
+    case forceWhite = "white"
+    case forceBlack = "black"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .auto: return "自動識別"
+        case .forceWhite: return "固定我執白"
+        case .forceBlack: return "固定我執黑"
+        }
+    }
+}
+
+enum PlayStyleMode: String, CaseIterable, Identifiable, Sendable {
+    case engineBest = "engineBest"
+    case humanSafe = "humanSafe"
+    case aggressive = "aggressive"
+    case defensive = "defensive"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .engineBest: return "最強引擎"
+        case .humanSafe: return "自然防封"
+        case .aggressive: return "積極進攻"
+        case .defensive: return "穩健防守"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .engineBest: return "cpu"
+        case .humanSafe: return "theatermasks"
+        case .aggressive: return "flame.fill"
+        case .defensive: return "shield.fill"
+        }
+    }
+}
+
+struct TacticalRadarReport: Equatable, Sendable {
+    let materialDiffForPerspective: Int
+    let capturedByUser: [ChessPiece]
+    let capturedByOpponent: [ChessPiece]
+    let hangingFriendlySquares: [BoardSquare]
+    let hangingDescriptions: [String]
+    let freeTargetDescriptions: [String]
+    let openingName: String
+    let recommendedThinkRange: String
+}
+
 struct PVLine: Identifiable, Equatable, Sendable {
     let multipvIndex: Int
     let bestMove: ChessMove
@@ -279,6 +333,29 @@ struct PVLine: Identifiable, Equatable, Sendable {
     let mateInMoves: Int?
     let depth: Int
     let sourceLabel: String
+    let predictedOpponentReply: ChessMove?
+
+    init(
+        multipvIndex: Int,
+        bestMove: ChessMove,
+        continuationSAN: [String],
+        continuationUCI: [String],
+        scoreCentipawns: Int,
+        mateInMoves: Int?,
+        depth: Int,
+        sourceLabel: String,
+        predictedOpponentReply: ChessMove? = nil
+    ) {
+        self.multipvIndex = multipvIndex
+        self.bestMove = bestMove
+        self.continuationSAN = continuationSAN
+        self.continuationUCI = continuationUCI
+        self.scoreCentipawns = scoreCentipawns
+        self.mateInMoves = mateInMoves
+        self.depth = depth
+        self.sourceLabel = sourceLabel
+        self.predictedOpponentReply = predictedOpponentReply
+    }
 
     var id: Int { multipvIndex }
 

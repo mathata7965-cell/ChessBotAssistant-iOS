@@ -7,6 +7,8 @@ struct LiveBroadcastPayload: Codable, Sendable {
     let sideToMove: String
     let confidence: Double
     let notes: String
+    let campConfidence: Double?
+    let campDetectionReason: String?
     let timestamp: Double
 }
 

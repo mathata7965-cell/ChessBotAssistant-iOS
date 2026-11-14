@@ -11,6 +11,8 @@ struct InteractiveChessBoardView: View {
     let highlightedPVIndex: Int?
     var coachPieceOnlyMode: Bool = false
     var isSafetyLocked: Bool = false
+    var hangingSquares: Set<BoardSquare> = []
+    var showOpponentReplyArrow: Bool = true
     let onTapSquare: (BoardSquare) -> Void
 
     private let lightSquareColor = Color(red: 0.922, green: 0.925, blue: 0.816) // #EBECD0
@@ -39,6 +41,7 @@ struct InteractiveChessBoardView: View {
                                 let isCheckedKing = piece?.type == .king &&
                                     piece?.color == boardState.sideToMove &&
                                     boardState.isKingInCheck(boardState.sideToMove)
+                                let isHanging = hangingSquares.contains(square)
 
                                 ZStack {
                                     // Base square color
@@ -69,6 +72,13 @@ struct InteractiveChessBoardView: View {
                                             startRadius: 2,
                                             endRadius: cellSize * 0.6
                                         )
+                                    }
+
+                                    // Hanging piece warning highlight
+                                    if isHanging && !isCheckedKing {
+                                        RoundedRectangle(cornerRadius: 3)
+                                            .stroke(Color(red: 1.0, green: 0.30, blue: 0.34).opacity(0.85), lineWidth: max(2, cellSize * 0.06))
+                                            .padding(1.5)
                                     }
 
                                     // Rank coordinate on left edge
@@ -126,7 +136,8 @@ struct InteractiveChessBoardView: View {
                     showArrows: showAutoHintArrows,
                     highlightedPVIndex: highlightedPVIndex,
                     coachPieceOnlyMode: coachPieceOnlyMode,
-                    isSafetyLocked: isSafetyLocked
+                    isSafetyLocked: isSafetyLocked,
+                    showOpponentReplyArrow: showOpponentReplyArrow
                 )
                 .frame(width: boardSize, height: boardSize)
             }

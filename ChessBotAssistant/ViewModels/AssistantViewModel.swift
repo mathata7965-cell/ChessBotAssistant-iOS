@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import Foundation
 import SwiftUI
@@ -25,6 +26,15 @@ final class AssistantViewModel: ObservableObject {
     @Published var isFairPlaySafetyLocked: Bool = false
     @Published var safetyLockReason: String?
 
+    // 自動陣營識別、戰術雷達、語音播報與勝率走勢
+    @Published var campDetectionMode: CampDetectionMode = .auto
+    @Published var alwaysAnalyzeMyCampTurn: Bool = true
+    @Published var detectedCampReason: String = "自動偵測：等待掃描"
+    @Published var voiceAnnounceEnabled: Bool = false
+    @Published var tacticalRadar: TacticalRadarReport = ChessBoardState.startingPosition.buildTacticalRadar(for: .white, moveHistorySAN: [])
+    @Published var evalHistoryWhitePct: [Double] = [50.0]
+    @Published var lastMoveQualityBadge: String? = nil
+
     @Published var showEngineSettingsSheet: Bool = false
     @Published var showScreenshotScannerSheet: Bool = false
     @Published var showBoardEditorSheet: Bool = false
@@ -38,6 +48,10 @@ final class AssistantViewModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var hasShownBroadcastSyncBanner: Bool = false
+    private let speechSynthesizer = AVSpeechSynthesizer()
+    private var lastSpokenFEN: String?
+    private var lastEvaluatedFEN: String?
+    private var previousCampWinPct: Double?
 
     init() {
         setupBindings()
@@ -82,6 +96,27 @@ final class AssistantViewModel: ObservableObject {
             .store(in: &cancellables)
 
         engineService.$currentAnalysis
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] analysis in
+                guard let self else { return }
+                if let analysis {
+                    self.recordAnalysisTelemetry(analysis)
+                    self.speakMoveAnnouncementIfNeeded(analysis)
+                }
+                self.syncPiPContent()
+            }
+            .store(in: &cancellables)
+
+        engineService.$playStyleMode
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.triggerAnalysis()
+            }
+            .store(in: &cancellables)
+
+        engineService.$showOpponentReplyArrow
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.syncPiPContent()
@@ -170,6 +205,8 @@ final class AssistantViewModel: ObservableObject {
     }
 
     func syncPiPContent() {
+        let radar = boardState.buildTacticalRadar(for: perspective, moveHistorySAN: moveHistorySAN)
+        tacticalRadar = radar
         pipManager.updateContent(
             board: boardState,
             analysis: engineService.currentAnalysis,
@@ -178,7 +215,12 @@ final class AssistantViewModel: ObservableObject {
             autoSyncActive: screenshotMonitor.isMonitoring || broadcastService.isBroadcastActive,
             coachPieceOnlyMode: engineService.coachPieceOnlyHintMode,
             isSafetyLocked: isFairPlaySafetyLocked,
-            zeroNetworkMode: engineService.zeroNetworkIsolationMode
+            zeroNetworkMode: engineService.zeroNetworkIsolationMode,
+            showOpponentReplyArrow: engineService.showOpponentReplyArrow,
+            campReason: detectedCampReason,
+            openingName: radar.openingName,
+            thinkRange: radar.recommendedThinkRange,
+            hangingCount: radar.hangingFriendlySquares.count
         )
     }
 
@@ -276,6 +318,11 @@ final class AssistantViewModel: ObservableObject {
         lastMove = nil
         isFairPlaySafetyLocked = false
         safetyLockReason = nil
+        evalHistoryWhitePct = [50.0]
+        lastMoveQualityBadge = nil
+        lastEvaluatedFEN = nil
+        previousCampWinPct = nil
+        lastSpokenFEN = nil
         clearSelection()
         showBanner("已重置為標準開局")
         triggerAnalysis()
@@ -283,7 +330,146 @@ final class AssistantViewModel: ObservableObject {
 
     func flipPerspective() {
         perspective = perspective.opposite
+        campDetectionMode = perspective == .white ? .forceWhite : .forceBlack
+        detectedCampReason = "手動切換：\(perspective.displayName)"
+        previousCampWinPct = nil
+        lastMoveQualityBadge = nil
+        if alwaysAnalyzeMyCampTurn {
+            boardState.sideToMove = perspective
+            boardState.enPassantTarget = nil
+        }
         syncPiPContent()
+        if alwaysAnalyzeMyCampTurn {
+            triggerAnalysis()
+        }
+    }
+
+    func cycleCampDetectionMode() {
+        switch campDetectionMode {
+        case .auto: setCampDetectionMode(.forceWhite)
+        case .forceWhite: setCampDetectionMode(.forceBlack)
+        case .forceBlack: setCampDetectionMode(.auto)
+        }
+    }
+
+    func setCampDetectionMode(_ mode: CampDetectionMode) {
+        campDetectionMode = mode
+        switch mode {
+        case .auto:
+            if let lastScan = lastScanResult {
+                perspective = lastScan.detectedPerspective
+                detectedCampReason = lastScan.campDetectionReason
+            } else {
+                detectedCampReason = "自動偵測：等待掃描"
+            }
+        case .forceWhite:
+            perspective = .white
+            detectedCampReason = "手動鎖定：固定我執白"
+        case .forceBlack:
+            perspective = .black
+            detectedCampReason = "手動鎖定：固定我執黑"
+        }
+        previousCampWinPct = nil
+        lastMoveQualityBadge = nil
+        if mode == .auto, let lastImg = lastScannedFullImage {
+            Task { [weak self] in
+                await self?.processScreenshotImage(lastImg, isFromBackgroundMonitor: false)
+            }
+            showBanner("陣營模式：\(mode.displayName)")
+            return
+        }
+        if alwaysAnalyzeMyCampTurn {
+            boardState.sideToMove = perspective
+            boardState.enPassantTarget = nil
+        }
+        showBanner("陣營模式：\(mode.displayName)")
+        triggerAnalysis()
+    }
+
+    func toggleAlwaysAnalyzeMyCampTurn() {
+        alwaysAnalyzeMyCampTurn.toggle()
+        if alwaysAnalyzeMyCampTurn && boardState.sideToMove != perspective {
+            boardState.sideToMove = perspective
+            boardState.enPassantTarget = nil
+            triggerAnalysis()
+        } else {
+            syncPiPContent()
+        }
+        showBanner(alwaysAnalyzeMyCampTurn ? "已鎖定：掃描後永遠分析我方回合" : "已關閉：保留原始輪次設定")
+    }
+
+    func cyclePlayStyleMode() {
+        let all = PlayStyleMode.allCases
+        if let idx = all.firstIndex(of: engineService.playStyleMode) {
+            engineService.playStyleMode = all[(idx + 1) % all.count]
+        } else {
+            engineService.playStyleMode = .engineBest
+        }
+        showBanner("棋風切換：\(engineService.playStyleMode.displayName)")
+    }
+
+    private func recordAnalysisTelemetry(_ analysis: EngineAnalysisResult) {
+        guard analysis.fen != lastEvaluatedFEN, let primary = analysis.primaryLine else { return }
+        lastEvaluatedFEN = analysis.fen
+        let whitePct = primary.winProbabilityWhite
+        evalHistoryWhitePct.append(whitePct)
+        if evalHistoryWhitePct.count > 24 {
+            evalHistoryWhitePct.removeFirst(evalHistoryWhitePct.count - 24)
+        }
+
+        let currentCampPct = primary.winProbability(for: perspective)
+        if let prevPct = previousCampWinPct {
+            let delta = currentCampPct - prevPct
+            if delta >= 3.0 {
+                lastMoveQualityBadge = "💎 妙手 (+\(Int(delta.rounded()))%)"
+            } else if delta >= -1.5 {
+                lastMoveQualityBadge = "✅ 最佳"
+            } else if delta >= -5.0 {
+                lastMoveQualityBadge = "👍 不錯"
+            } else if delta >= -12.0 {
+                lastMoveQualityBadge = "⚠️ 不精確 (\(Int(delta.rounded()))%)"
+            } else {
+                lastMoveQualityBadge = "❌ 失誤 (\(Int(delta.rounded()))%)"
+            }
+        }
+        previousCampWinPct = currentCampPct
+    }
+
+    private func speakMoveAnnouncementIfNeeded(_ analysis: EngineAnalysisResult) {
+        guard voiceAnnounceEnabled else { return }
+        guard analysis.fen != lastSpokenFEN, let bestMove = analysis.primaryLine?.bestMove else { return }
+        lastSpokenFEN = analysis.fen
+
+        let pieceText: String
+        let san = bestMove.san
+        if san == "O-O" {
+            pieceText = "短易位"
+        } else if san == "O-O-O" {
+            pieceText = "長易位"
+        } else {
+            let roleName: String
+            switch san.first {
+            case "K": roleName = "國王"
+            case "Q": roleName = "皇后"
+            case "R": roleName = "城堡"
+            case "B": roleName = "主教"
+            case "N": roleName = "騎士"
+            default: roleName = ""
+            }
+            let prefix = roleName.isEmpty ? "" : "\(roleName) "
+            pieceText = "\(prefix)\(bestMove.from.algebraic) 到 \(bestMove.to.algebraic)"
+        }
+
+        let campName = perspective == .white ? "我方白棋" : "我方黑棋"
+        let text = "\(campName)，推薦 \(pieceText)"
+
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "zh-TW")
+        utterance.rate = 0.52
+        if speechSynthesizer.isSpeaking {
+            speechSynthesizer.stopSpeaking(at: .immediate)
+        }
+        speechSynthesizer.speak(utterance)
     }
 
     func toggleSideToMove() {
@@ -380,8 +566,30 @@ final class AssistantViewModel: ObservableObject {
 
     private func handleBroadcastPayload(_ payload: LiveBroadcastPayload) {
         guard let parsedBoard = ChessBoardState(fen: payload.fen) else { return }
-        let newPerspective = PieceColor(rawValue: payload.perspective) ?? perspective
-        let boardChanged = parsedBoard.squares != boardState.squares || parsedBoard.sideToMove != boardState.sideToMove
+        let newPerspective: PieceColor
+        switch campDetectionMode {
+        case .auto:
+            newPerspective = PieceColor(rawValue: payload.perspective) ?? perspective
+            if let reason = payload.campDetectionReason, !reason.isEmpty {
+                detectedCampReason = reason
+            } else {
+                detectedCampReason = "實時同步：\(newPerspective == .white ? "白方在下方" : "黑方在下方")"
+            }
+        case .forceWhite:
+            newPerspective = .white
+            detectedCampReason = "手動鎖定：固定我執白"
+        case .forceBlack:
+            newPerspective = .black
+            detectedCampReason = "手動鎖定：固定我執黑"
+        }
+
+        var adjustedBoard = parsedBoard
+        if alwaysAnalyzeMyCampTurn && adjustedBoard.sideToMove != newPerspective {
+            adjustedBoard.sideToMove = newPerspective
+            adjustedBoard.enPassantTarget = nil
+        }
+
+        let boardChanged = adjustedBoard.squares != boardState.squares || adjustedBoard.sideToMove != boardState.sideToMove
         let perspChanged = newPerspective != perspective
 
         lastSyncTimestamp = Date()
@@ -396,7 +604,7 @@ final class AssistantViewModel: ObservableObject {
 
         if boardChanged {
             history.append(boardState)
-            boardState = parsedBoard
+            boardState = adjustedBoard
             lastMove = nil
             clearSelection()
         }
@@ -500,12 +708,20 @@ final class AssistantViewModel: ObservableObject {
         lastScannedFullImage = image
         let fallbackPerspective = perspective
         let prevBoard = boardState
+        let forcedPersp: PieceColor?
+        switch campDetectionMode {
+        case .auto: forcedPersp = nil
+        case .forceWhite: forcedPersp = .white
+        case .forceBlack: forcedPersp = .black
+        }
+        let forcedSide: PieceColor? = alwaysAnalyzeMyCampTurn ? forcedPersp : nil
         let result = await Task.detached(priority: .userInitiated) {
             await ScreenshotBoardRecognizer.shared.recognizeBoard(
                 from: image,
                 fallbackPerspective: fallbackPerspective,
-                sideToMove: nil,
-                previousBoard: prevBoard
+                sideToMove: forcedSide,
+                previousBoard: prevBoard,
+                forcedPerspective: forcedPersp
             )
         }.value
 
@@ -561,17 +777,36 @@ final class AssistantViewModel: ObservableObject {
     }
 
     func applyRecognizedBoard(_ result: RecognizedBoardResult, keepSideToMoveIfSameBoard: Bool = false) {
-        let newBoard = result.boardState
+        var newBoard = result.boardState
         _ = keepSideToMoveIfSameBoard
+
+        let resolvedCamp: PieceColor
+        switch campDetectionMode {
+        case .auto:
+            resolvedCamp = result.detectedPerspective
+            detectedCampReason = result.campDetectionReason
+        case .forceWhite:
+            resolvedCamp = .white
+            detectedCampReason = "手動鎖定：固定我執白"
+        case .forceBlack:
+            resolvedCamp = .black
+            detectedCampReason = "手動鎖定：固定我執黑"
+        }
+
+        if alwaysAnalyzeMyCampTurn {
+            newBoard.sideToMove = resolvedCamp
+            newBoard.enPassantTarget = nil
+        }
+
         history.append(boardState)
         boardState = newBoard
-        perspective = result.detectedPerspective
+        perspective = resolvedCamp
         lastMove = nil
         clearSelection()
         if isFairPlaySafetyLocked {
             showBanner("⚠️ \(result.detectedMatchContextNote)")
         } else {
-            showBanner("截圖辨識完成：\(result.notes)")
+            showBanner("截圖辨識完成（\(detectedCampReason)）")
         }
         triggerAnalysis()
     }

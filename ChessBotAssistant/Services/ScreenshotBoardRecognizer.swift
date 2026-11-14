@@ -12,6 +12,8 @@ struct RecognizedBoardResult: Sendable {
     let isLikelyHumanTimedGame: Bool
     let isConfirmedBotMatch: Bool
     let detectedMatchContextNote: String
+    let campConfidence: Double
+    let campDetectionReason: String
 }
 
 final class ScreenshotBoardRecognizer: Sendable {
@@ -23,7 +25,8 @@ final class ScreenshotBoardRecognizer: Sendable {
         from image: UIImage,
         fallbackPerspective: PieceColor = .white,
         sideToMove: PieceColor? = nil,
-        previousBoard: ChessBoardState = .startingPosition
+        previousBoard: ChessBoardState = .startingPosition,
+        forcedPerspective: PieceColor? = nil
     ) async -> RecognizedBoardResult? {
         guard let uprightCG = normalizedCGImage(from: image) else { return nil }
         guard let syncResult = recognizeBoardSync(
@@ -31,7 +34,8 @@ final class ScreenshotBoardRecognizer: Sendable {
             fallbackPerspective: fallbackPerspective,
             sideToMove: sideToMove,
             previousBoard: previousBoard,
-            includePNGCrop: true
+            includePNGCrop: true,
+            forcedPerspective: forcedPerspective
         ) else {
             return nil
         }
@@ -45,6 +49,51 @@ final class ScreenshotBoardRecognizer: Sendable {
             height: syncResult.boardRectNormalized.height * imgH
         ).integral
 
+        var resolvedSync = syncResult
+        let clampedCropRect = pixelRect.intersection(CGRect(x: 0, y: 0, width: uprightCG.width, height: uprightCG.height))
+        if forcedPerspective == nil,
+           let cropped = uprightCG.cropping(to: clampedCropRect),
+           let ocrPerspective = await detectBoardPerspective(boardCGImage: cropped) {
+            if ocrPerspective != syncResult.detectedPerspective,
+               syncResult.campConfidence < 0.78,
+               let correctedSync = recognizeBoardSync(
+                   from: uprightCG,
+                   fallbackPerspective: fallbackPerspective,
+                   sideToMove: sideToMove,
+                   previousBoard: previousBoard,
+                   includePNGCrop: true,
+                   forcedPerspective: ocrPerspective
+               ) {
+                resolvedSync = RecognizedBoardResult(
+                    boardState: correctedSync.boardState,
+                    croppedBoardPNGData: correctedSync.croppedBoardPNGData,
+                    boardRectNormalized: correctedSync.boardRectNormalized,
+                    detectedPerspective: correctedSync.detectedPerspective,
+                    confidence: correctedSync.confidence,
+                    notes: correctedSync.notes,
+                    isLikelyHumanTimedGame: correctedSync.isLikelyHumanTimedGame,
+                    isConfirmedBotMatch: correctedSync.isConfirmedBotMatch,
+                    detectedMatchContextNote: correctedSync.detectedMatchContextNote,
+                    campConfidence: 0.92,
+                    campDetectionReason: "自動識別（角標 OCR 校驗）：我方執\(ocrPerspective.displayName)"
+                )
+            } else if ocrPerspective == syncResult.detectedPerspective {
+                resolvedSync = RecognizedBoardResult(
+                    boardState: syncResult.boardState,
+                    croppedBoardPNGData: syncResult.croppedBoardPNGData,
+                    boardRectNormalized: syncResult.boardRectNormalized,
+                    detectedPerspective: syncResult.detectedPerspective,
+                    confidence: syncResult.confidence,
+                    notes: syncResult.notes,
+                    isLikelyHumanTimedGame: syncResult.isLikelyHumanTimedGame,
+                    isConfirmedBotMatch: syncResult.isConfirmedBotMatch,
+                    detectedMatchContextNote: syncResult.detectedMatchContextNote,
+                    campConfidence: max(syncResult.campConfidence, 0.95),
+                    campDetectionReason: "自動識別（棋子分群+角標一致）：我方執\(ocrPerspective.displayName)（信心 \(Int(max(syncResult.campConfidence, 0.95) * 100))%）"
+                )
+            }
+        }
+
         // Analyze surrounding header/footer for Fair-Play human timed match detection (CPU-only Vision)
         let matchContext = await analyzeMatchContext(
             fullCGImage: uprightCG,
@@ -52,15 +101,17 @@ final class ScreenshotBoardRecognizer: Sendable {
         )
 
         return RecognizedBoardResult(
-            boardState: syncResult.boardState,
-            croppedBoardPNGData: syncResult.croppedBoardPNGData,
-            boardRectNormalized: syncResult.boardRectNormalized,
-            detectedPerspective: syncResult.detectedPerspective,
-            confidence: syncResult.confidence,
-            notes: syncResult.notes,
+            boardState: resolvedSync.boardState,
+            croppedBoardPNGData: resolvedSync.croppedBoardPNGData,
+            boardRectNormalized: resolvedSync.boardRectNormalized,
+            detectedPerspective: resolvedSync.detectedPerspective,
+            confidence: resolvedSync.confidence,
+            notes: resolvedSync.notes,
             isLikelyHumanTimedGame: matchContext.isHumanTimed,
             isConfirmedBotMatch: matchContext.isBot,
-            detectedMatchContextNote: matchContext.note
+            detectedMatchContextNote: matchContext.note,
+            campConfidence: resolvedSync.campConfidence,
+            campDetectionReason: resolvedSync.campDetectionReason
         )
     }
 
@@ -69,7 +120,8 @@ final class ScreenshotBoardRecognizer: Sendable {
         fallbackPerspective: PieceColor = .white,
         sideToMove: PieceColor? = nil,
         previousBoard: ChessBoardState = .startingPosition,
-        includePNGCrop: Bool = true
+        includePNGCrop: Bool = true,
+        forcedPerspective: PieceColor? = nil
     ) -> RecognizedBoardResult? {
         let imgW = uprightCG.width
         let imgH = uprightCG.height
@@ -88,12 +140,13 @@ final class ScreenshotBoardRecognizer: Sendable {
             return nil
         }
 
-        // 2. Pure-pixel perspective detection + 64-cell classification (safe for ReplayKit & background)
+        // 2. Adaptive Two-Cluster Color + Multi-Signal Perspective Detection + 64-cell classification
         let classification = classify64Squares(
             boardCGImage: croppedBoard,
             fallbackPerspective: fallbackPerspective,
             preferredSideToMove: sideToMove,
-            previousBoard: previousBoard
+            previousBoard: previousBoard,
+            forcedPerspective: forcedPerspective
         )
 
         let pngData: Data? = includePNGCrop ? UIImage(cgImage: croppedBoard).pngData() : nil
@@ -114,7 +167,9 @@ final class ScreenshotBoardRecognizer: Sendable {
             notes: classification.notes,
             isLikelyHumanTimedGame: false,
             isConfirmedBotMatch: false,
-            detectedMatchContextNote: "純像素即時同步"
+            detectedMatchContextNote: "純像素即時同步",
+            campConfidence: classification.campConfidence,
+            campDetectionReason: classification.campReason
         )
     }
 
@@ -357,7 +412,7 @@ final class ScreenshotBoardRecognizer: Sendable {
 
     // MARK: - Orientation Detection via Vision OCR
 
-    private func detectBoardPerspective(boardCGImage: CGImage, fallback: PieceColor) async -> PieceColor {
+    private func detectBoardPerspective(boardCGImage: CGImage) async -> PieceColor? {
         let w = boardCGImage.width
         let h = boardCGImage.height
         let cellW = w / 8
@@ -379,7 +434,7 @@ final class ScreenshotBoardRecognizer: Sendable {
             if ch == "a" { return .black }
         }
 
-        return fallback
+        return nil
     }
 
     private func recognizeSingleCharLabel(in cgImage: CGImage?) async -> String? {
@@ -526,15 +581,31 @@ final class ScreenshotBoardRecognizer: Sendable {
         let isHighlighted: Bool
     }
 
+    private struct ForegroundCellMask {
+        let mask: [[Bool]]
+        let minX: Int
+        let maxX: Int
+        let minY: Int
+        let maxY: Int
+        let innerSize: Int
+        let fgCount: Int
+        let coverage: Double
+        let avgLum: Double
+        let avgRMinusB: Double
+        let colorScore: Double
+        let isHighlighted: Bool
+    }
+
     private func classify64Squares(
         boardCGImage: CGImage,
         fallbackPerspective: PieceColor,
         preferredSideToMove: PieceColor?,
-        previousBoard: ChessBoardState
-    ) -> (board: ChessBoardState, perspective: PieceColor, confidence: Double, notes: String) {
+        previousBoard: ChessBoardState,
+        forcedPerspective: PieceColor? = nil
+    ) -> (board: ChessBoardState, perspective: PieceColor, confidence: Double, notes: String, campConfidence: Double, campReason: String) {
         let normSize = 400 // 50x50 px per square
         guard let rgba = renderRGBABuffer(cgImage: boardCGImage, width: normSize, height: normSize) else {
-            return (ChessBoardState.startingPosition, fallbackPerspective, 0.0, "無法讀取圖像像素")
+            return (ChessBoardState.startingPosition, fallbackPerspective, 0.0, "無法讀取圖像像素", 0.5, "無法識別陣營（使用預設方向）")
         }
 
         let cellSize = 50
@@ -556,10 +627,11 @@ final class ScreenshotBoardRecognizer: Sendable {
         let globalLight = RGBColor(r: median(lightR), g: median(lightG), b: median(lightB))
         let globalDark = RGBColor(r: median(darkR), g: median(darkG), b: median(darkB))
 
-        var screenCells: [[ScreenCellSample?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
+        // Pass 1: Extract foreground masks & luminance/tint scores for adaptive two-cluster color split
+        var fgGrid: [[ForegroundCellMask?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
         var screenHighlights: [[Bool]] = Array(repeating: Array(repeating: false, count: 8), count: 8)
-        var whiteBottomScore = 0
-        var blackBottomScore = 0
+        var colorScores: [Double] = []
+        colorScores.reserveCapacity(32)
 
         for screenRow in 0..<8 {
             for screenCol in 0..<8 {
@@ -577,37 +649,114 @@ final class ScreenshotBoardRecognizer: Sendable {
                 screenHighlights[screenRow][screenCol] = isHighlighted
                 let bg = bgDist > 18.0 ? localCorner : globalBG
 
-                if let result = classifyCell(
+                if let fgMask = extractForegroundMask(
                     rgba: rgba,
                     strideW: normSize,
                     screenRow: screenRow,
                     screenCol: screenCol,
                     cellSize: cellSize,
-                    bg: bg
+                    bg: bg,
+                    isHighlighted: isHighlighted
                 ) {
-                    screenCells[screenRow][screenCol] = ScreenCellSample(
-                        piece: result.piece,
-                        confidence: result.confidence,
-                        kingLikelihood: result.kingLikelihood,
-                        coverage: result.coverage,
-                        isHighlighted: isHighlighted
-                    )
-                    if screenRow >= 5 {
-                        if result.piece.color == .white { whiteBottomScore += 1 } else { blackBottomScore += 1 }
-                    } else if screenRow <= 2 {
-                        if result.piece.color == .black { whiteBottomScore += 1 } else { blackBottomScore += 1 }
-                    }
+                    fgGrid[screenRow][screenCol] = fgMask
+                    colorScores.append(fgMask.colorScore)
                 }
             }
         }
 
+        var dynamicColorSplit: Double? = nil
+        let sortedScores = colorScores.sorted()
+        if sortedScores.count >= 4 {
+            let k = max(1, (sortedScores.count * 2) / 5)
+            let darkCluster = Array(sortedScores.prefix(k))
+            let brightCluster = Array(sortedScores.suffix(k))
+            let darkMed = median(darkCluster)
+            let brightMed = median(brightCluster)
+            if brightMed - darkMed > 14.0 {
+                dynamicColorSplit = (darkMed + brightMed) / 2.0
+            }
+        }
+
+        // Pass 2: Classify piece color & shape, and accumulate weighted camp signals
+        var screenCells: [[ScreenCellSample?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
+        var whiteBottomScore = 0
+        var blackBottomScore = 0
+
+        for screenRow in 0..<8 {
+            for screenCol in 0..<8 {
+                guard let fgMask = fgGrid[screenRow][screenCol] else { continue }
+                let pieceColor: PieceColor
+                if let split = dynamicColorSplit {
+                    pieceColor = fgMask.colorScore >= split ? .white : .black
+                } else {
+                    pieceColor = (fgMask.avgRMinusB > 5.0 || fgMask.avgLum > 145.0) ? .white : .black
+                }
+
+                let result = classifyPieceFromMask(fgMask, pieceColor: pieceColor)
+                screenCells[screenRow][screenCol] = ScreenCellSample(
+                    piece: result.piece,
+                    confidence: result.confidence,
+                    kingLikelihood: result.kingLikelihood,
+                    coverage: result.coverage,
+                    isHighlighted: fgMask.isHighlighted
+                )
+
+                let weight: Int
+                switch screenRow {
+                case 7, 0: weight = 4
+                case 6, 1: weight = 3
+                case 5, 2: weight = 1
+                default: weight = 0
+                }
+                if screenRow >= 5 {
+                    if pieceColor == .white { whiteBottomScore += weight } else { blackBottomScore += weight }
+                } else if screenRow <= 2 {
+                    if pieceColor == .black { whiteBottomScore += weight } else { blackBottomScore += weight }
+                }
+            }
+        }
+
+        // Signal 2: Back-rank King/Queen structural tie-breaker (e-file vs d-file)
+        if let eBottom = screenCells[7][4], let dBottom = screenCells[7][3],
+           eBottom.kingLikelihood > dBottom.kingLikelihood + 0.15 {
+            whiteBottomScore += 2
+        } else if let eBottom = screenCells[7][4], let dBottom = screenCells[7][3],
+                  dBottom.kingLikelihood > eBottom.kingLikelihood + 0.15 {
+            blackBottomScore += 2
+        }
+        if let eTop = screenCells[0][4], let dTop = screenCells[0][3],
+           eTop.kingLikelihood > dTop.kingLikelihood + 0.15 {
+            whiteBottomScore += 2
+        } else if let eTop = screenCells[0][4], let dTop = screenCells[0][3],
+                  dTop.kingLikelihood > eTop.kingLikelihood + 0.15 {
+            blackBottomScore += 2
+        }
+
         let perspective: PieceColor
-        if whiteBottomScore > blackBottomScore {
-            perspective = .white
-        } else if blackBottomScore > whiteBottomScore {
-            perspective = .black
+        let campConfidence: Double
+        let campReason: String
+
+        if let forced = forcedPerspective {
+            perspective = forced
+            campConfidence = 1.0
+            campReason = "已指定我方執\(forced.displayName)"
         } else {
-            perspective = fallbackPerspective
+            if whiteBottomScore > blackBottomScore {
+                perspective = .white
+            } else if blackBottomScore > whiteBottomScore {
+                perspective = .black
+            } else {
+                perspective = fallbackPerspective
+            }
+
+            let totalWeight = whiteBottomScore + blackBottomScore
+            let margin = abs(whiteBottomScore - blackBottomScore)
+            if totalWeight > 0 && margin > 0 {
+                campConfidence = min(0.99, 0.50 + 0.50 * Double(margin) / Double(max(6, totalWeight)))
+            } else {
+                campConfidence = 0.55
+            }
+            campReason = "自動識別：我方執\(perspective.displayName)（信心 \(Int((campConfidence * 100).rounded()))%）"
         }
 
         var observedGrid: [[CellObservation?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
@@ -657,7 +806,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         let avgConf = detectedPieceCount > 0 ? (pieceConfidenceSum / Double(detectedPieceCount)) : 0.65
         let turnNote = resolvedSideToMove.displayName
         let note = "已辨識 \(detectedPieceCount) 枚棋子（視角：\(perspective.displayName)｜輪到：\(turnNote)｜\(methodLabel)）"
-        return (reconstructedBoard, perspective, avgConf, note)
+        return (reconstructedBoard, perspective, avgConf, note, campConfidence, campReason)
     }
 
     private func reconstructGridFromReference(
@@ -1214,14 +1363,15 @@ final class ScreenshotBoardRecognizer: Sendable {
         return vec
     }
 
-    private func classifyCell(
+    private func extractForegroundMask(
         rgba: [UInt8],
         strideW: Int,
         screenRow: Int,
         screenCol: Int,
         cellSize: Int,
-        bg: RGBColor
-    ) -> (piece: ChessPiece, confidence: Double, kingLikelihood: Double, coverage: Double)? {
+        bg: RGBColor,
+        isHighlighted: Bool
+    ) -> ForegroundCellMask? {
         let baseX = screenCol * cellSize
         let baseY = screenRow * cellSize
         let pad = 5 // analyze inner 40x40 of the 50x50 square
@@ -1261,10 +1411,38 @@ final class ScreenshotBoardRecognizer: Sendable {
             return nil
         }
 
-        // Determine Piece Color (White vs Black) supporting both standard and custom tinted skins (e.g. pink vs dark blue-purple)
         let avgRMinusB = fgCount > 0 ? fgRMinusBSum / Double(fgCount) : 0.0
         let avgLum = fgCount > 0 ? fgLumSum / Double(fgCount) : 0.0
-        let pieceColor: PieceColor = (avgRMinusB > 5.0 || avgLum > 145.0) ? .white : .black
+        let colorScore = avgLum + 0.35 * avgRMinusB
+
+        return ForegroundCellMask(
+            mask: mask,
+            minX: minX,
+            maxX: maxX,
+            minY: minY,
+            maxY: maxY,
+            innerSize: innerSize,
+            fgCount: fgCount,
+            coverage: coverage,
+            avgLum: avgLum,
+            avgRMinusB: avgRMinusB,
+            colorScore: colorScore,
+            isHighlighted: isHighlighted
+        )
+    }
+
+    private func classifyPieceFromMask(
+        _ fg: ForegroundCellMask,
+        pieceColor: PieceColor
+    ) -> (piece: ChessPiece, confidence: Double, kingLikelihood: Double, coverage: Double) {
+        let mask = fg.mask
+        let innerSize = fg.innerSize
+        let minX = fg.minX
+        let maxX = fg.maxX
+        let minY = fg.minY
+        let maxY = fg.maxY
+        let fgCount = fg.fgCount
+        let coverage = fg.coverage
 
         // 8x8 block density template match (supports custom 3D skins like Ocean dolphin/racecar/gas-mask sets)
         let grid64 = extractGrid64(from: mask)
