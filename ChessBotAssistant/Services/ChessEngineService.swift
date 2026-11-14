@@ -14,6 +14,7 @@ final class ChessEngineService: ObservableObject {
 
     // 下棋風格與進階戰術視覺化設定
     @Published var playStyleMode: PlayStyleMode = .engineBest
+    @Published var botTargetProfile: BotTargetProfile = .universal
     @Published var showOpponentReplyArrow: Bool = true
 
     @Published private(set) var isAnalyzing: Bool = false
@@ -28,7 +29,7 @@ final class ChessEngineService: ObservableObject {
     @discardableResult
     func reapplyPlayStyle(for board: ChessBoardState) -> Bool {
         guard lastRawPositionKey == board.positionKey, let raw = lastRawAnalysis else { return false }
-        currentAnalysis = Self.applyPlayStyle(playStyleMode, to: raw, board: board)
+        currentAnalysis = Self.applyPlayStyle(playStyleMode, botProfile: botTargetProfile, to: raw, board: board)
         return true
     }
 
@@ -69,12 +70,35 @@ final class ChessEngineService: ObservableObject {
         let isZeroNetwork = zeroNetworkIsolationMode
         let allowCloud = useCloudStockfish && !isZeroNetwork
         let activeStyle = playStyleMode
+        let activeBotProfile = botTargetProfile
         let cacheKey = "\(board.positionKey)|d\(requestedDepth)|pv\(requestedPV)"
+
+        // 0. Check bundled 10MB Offline GM Engine Pack opening book first (0ms response)
+        if let bookHit = OfflineEnginePack.shared.lookupBookLines(for: board, multiPV: requestedPV),
+           !bookHit.lines.isEmpty {
+            let bookResult = EngineAnalysisResult(
+                fen: fen,
+                sideToMove: board.sideToMove,
+                lines: bookHit.lines,
+                depthReached: 20,
+                isCloudVerified: true,
+                engineSource: "📚 離線大師開局庫 (\(OfflineEnginePack.shared.packSizeMBString))",
+                nodesSearched: bookHit.lines.count,
+                timestamp: Date()
+            )
+            lastRawAnalysis = bookResult
+            lastRawPositionKey = board.positionKey
+            currentAnalysis = Self.applyPlayStyle(activeStyle, botProfile: activeBotProfile, to: bookResult, board: board)
+            if !allowCloud || bookHit.lines.count >= requestedPV {
+                isAnalyzing = false
+                return
+            }
+        }
 
         if allowCloud, let cached = cloudCache[cacheKey] {
             lastRawAnalysis = cached
             lastRawPositionKey = board.positionKey
-            currentAnalysis = Self.applyPlayStyle(activeStyle, to: cached, board: board)
+            currentAnalysis = Self.applyPlayStyle(activeStyle, botProfile: activeBotProfile, to: cached, board: board)
             isAnalyzing = false
             return
         }
@@ -105,7 +129,7 @@ final class ChessEngineService: ObservableObject {
             if Task.isCancelled { return }
             self.lastRawAnalysis = localResult
             self.lastRawPositionKey = board.positionKey
-            self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, to: localResult, board: board)
+            self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, botProfile: self.botTargetProfile, to: localResult, board: board)
 
             // 2. If Cloud Stockfish is disabled or Zero-Network Isolation is active, finish strictly offline
             guard allowCloud else {
@@ -124,7 +148,7 @@ final class ChessEngineService: ObservableObject {
                 self.cloudCache[cacheKey] = mergedCloud
                 self.lastRawAnalysis = mergedCloud
                 self.lastRawPositionKey = board.positionKey
-                self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, to: mergedCloud, board: board)
+                self.currentAnalysis = Self.applyPlayStyle(self.playStyleMode, botProfile: self.botTargetProfile, to: mergedCloud, board: board)
             }
 
             if !Task.isCancelled {
@@ -362,21 +386,41 @@ final class ChessEngineService: ObservableObject {
 
     nonisolated static func applyPlayStyle(
         _ style: PlayStyleMode,
+        botProfile: BotTargetProfile = .universal,
         to result: EngineAnalysisResult,
         board: ChessBoardState
     ) -> EngineAnalysisResult {
-        guard style != .engineBest, result.lines.count > 1 else {
+        guard (style != .engineBest || botProfile != .universal), result.lines.count > 1 else {
             return result
         }
 
         let sideMultiplier = board.sideToMove == .white ? 1 : -1
         let bestCpForSide = (result.lines.first?.scoreCentipawns ?? 0) * sideMultiplier
-        let toleranceCp: Int
+        let styleTolerance: Int
         switch style {
-        case .engineBest: toleranceCp = 0
-        case .humanSafe: toleranceCp = 30
-        case .aggressive: toleranceCp = 45
-        case .defensive: toleranceCp = 35
+        case .engineBest: styleTolerance = 0
+        case .humanSafe: styleTolerance = 30
+        case .aggressive: styleTolerance = 45
+        case .defensive: styleTolerance = 35
+        }
+        let profileTolerance: Int
+        switch botProfile {
+        case .universal: profileTolerance = 0
+        case .antiNelson: profileTolerance = 40
+        case .beginnerCrusher: profileTolerance = 45
+        case .antiMaster: profileTolerance = 25
+        }
+        let toleranceCp = max(styleTolerance, profileTolerance)
+
+        let enemyColor = board.sideToMove.opposite
+        var enemyQueenSq: BoardSquare? = nil
+        outer: for r in 0..<8 {
+            for c in 0..<8 {
+                if let p = board.squares[r][c], p.color == enemyColor, p.type == .queen {
+                    enemyQueenSq = BoardSquare(row: r, col: c)
+                    break outer
+                }
+            }
         }
 
         func styleBonus(for line: PVLine) -> Int {
@@ -388,7 +432,7 @@ final class ChessEngineService: ObservableObject {
             let san = line.bestMove.san
             let move = line.bestMove
             let after = board.applying(move)
-            let isInDangerAfter = after.isSquareAttacked(row: move.to.row, col: move.to.col, by: board.sideToMove.opposite)
+            let isInDangerAfter = after.isSquareAttacked(row: move.to.row, col: move.to.col, by: enemyColor)
                 && !after.isSquareAttacked(row: move.to.row, col: move.to.col, by: board.sideToMove)
 
             switch style {
@@ -406,8 +450,36 @@ final class ChessEngineService: ObservableObject {
             case .humanSafe:
                 if !isInDangerAfter { bonus += 40 }
                 if move.isCastling { bonus += 60 }
-                // Prefer natural developing/central moves slightly over obscure computer pawn pushes
                 if let p = board.piece(at: move.from), p.type == .knight || p.type == .bishop {
+                    bonus += 30
+                }
+            }
+
+            switch botProfile {
+            case .universal:
+                break
+            case .antiNelson:
+                if move.capturedPiece?.type == .queen {
+                    bonus += 600
+                } else if let qSq = enemyQueenSq,
+                          !isInDangerAfter,
+                          after.isSquareAttacked(row: qSq.row, col: qSq.col, by: board.sideToMove) {
+                    bonus += 140
+                }
+                if board.fullMoveNumber <= 12,
+                   let p = board.piece(at: move.from),
+                   p.type == .knight || p.type == .bishop || move.isCastling {
+                    bonus += 55
+                }
+            case .beginnerCrusher:
+                if san.contains("#") { bonus += 600 }
+                if san.contains("+") { bonus += 110 }
+                if move.capturedPiece != nil { bonus += 80 }
+            case .antiMaster:
+                if !isInDangerAfter { bonus += 75 }
+                if move.isCastling { bonus += 95 }
+                if let p = board.piece(at: move.from),
+                   !(p.type == .pawn && board.fullMoveNumber <= 16 && (move.from.col >= 5 || move.from.col <= 2)) {
                     bonus += 30
                 }
             }
@@ -421,10 +493,11 @@ final class ChessEngineService: ObservableObject {
             return a.scoreCentipawns * sideMultiplier > b.scoreCentipawns * sideMultiplier
         }
 
+        let modeTag = style == .engineBest ? botProfile.shortName : style.displayName
         let reindexed: [PVLine] = ranked.enumerated().map { idx, line in
             var moveCopy = line.bestMove
             if idx == 0 && (moveCopy.tacticalTag == nil || moveCopy.tacticalTag?.isEmpty == true) {
-                moveCopy.tacticalTag = style.displayName
+                moveCopy.tacticalTag = modeTag
             }
             return PVLine(
                 multipvIndex: idx + 1,
@@ -434,7 +507,7 @@ final class ChessEngineService: ObservableObject {
                 scoreCentipawns: line.scoreCentipawns,
                 mateInMoves: line.mateInMoves,
                 depth: line.depth,
-                sourceLabel: "\(line.sourceLabel)•\(style.displayName)",
+                sourceLabel: "\(line.sourceLabel)•\(modeTag)",
                 predictedOpponentReply: line.predictedOpponentReply
             )
         }
@@ -445,7 +518,7 @@ final class ChessEngineService: ObservableObject {
             lines: reindexed,
             depthReached: result.depthReached,
             isCloudVerified: result.isCloudVerified,
-            engineSource: "\(result.engineSource)（\(style.displayName)）",
+            engineSource: "\(result.engineSource)（\(modeTag)）",
             nodesSearched: result.nodesSearched,
             timestamp: result.timestamp
         )
@@ -587,13 +660,76 @@ private enum LocalAlphaBetaEngine {
         -53, -33, -21, -11, -28, -14, -24, -43
     ]
 
+    private static let egKnightPST: [Int] = [
+        -58, -38, -13, -28, -31, -27, -63, -99,
+        -25,  -8, -25,  -2,  -9, -25, -24, -52,
+        -24, -20,  10,   9,  -1,  -9, -19, -41,
+        -17,   3,  22,  22,  22,  11,   8, -18,
+        -18,  -6,  16,  25,  16,  17,   4, -18,
+        -23,  -3,  -1,  15,  10,  -3, -20, -22,
+        -42, -20, -10,  -5,  -2, -20, -23, -44,
+        -29, -51, -23, -15, -22, -18, -50, -64
+    ]
+
+    private static let egBishopPST: [Int] = [
+        -14, -21, -11,  -8,  -7,  -9, -17, -24,
+         -8,  -4,   7, -12,  -3, -13,  -4, -14,
+          2,  -8,   0,  -1,  -2,   6,   0,   4,
+         -3,   9,  12,   9,  14,  10,   3,   2,
+         -6,   3,  13,  19,   7,  10,  -3,  -9,
+        -12,  -3,   8,  10,  13,   3,  -7, -15,
+        -14, -18,  -7,  -1,   4,  -9, -15, -27,
+        -23,  -9, -23,  -5,  -9, -16,  -5, -17
+    ]
+
+    private static let egRookPST: [Int] = [
+         13,  10,  18,  15,  12,  12,   8,   5,
+         11,  13,  13,  11,  -3,   3,   8,   3,
+          7,   7,   7,   5,   4,  -3,  -5,  -3,
+          4,   3,  13,   1,   2,   1,  -1,   2,
+          3,   5,   8,   4,  -5,  -6,  -8, -11,
+         -4,   0,  -5,  -1,  -7, -12,  -8, -16,
+         -6,  -6,   0,   2,  -9,  -9, -11,  -3,
+         -9,   2,   3,  -1,  -5, -13,   4, -20
+    ]
+
+    private static let egQueenPST: [Int] = [
+         -9,  22,  22,  27,  27,  19,  10,  20,
+        -17,  20,  32,  41,  58,  25,  30,   0,
+        -20,   6,   9,  49,  47,  35,  19,   9,
+          3,  22,  24,  45,  57,  40,  57,  36,
+        -18,  28,  19,  47,  31,  34,  39,  23,
+        -16, -27,  15,   6,   9,  17,  10,   5,
+        -22, -23, -30, -16, -16, -23, -36, -32,
+        -33, -28, -22, -43,  -5, -32, -20, -41
+    ]
+
+    private struct TTEntry {
+        var key: UInt64 = 0
+        var depth: Int = -1
+        var score: Int = 0
+        var flag: UInt8 = 0
+        var bestUCI: String = ""
+    }
+
     private final class SearchContext {
         var nodes: Int = 0
         let deadline: Date
         var cancelled: Bool = false
+        var tt: [TTEntry] = Array(repeating: TTEntry(), count: 16_384)
+        var killers: [[String]] = Array(repeating: [], count: 32)
 
         init(deadline: Date) {
             self.deadline = deadline
+        }
+
+        func recordKiller(_ uci: String, ply: Int) {
+            guard ply >= 0 && ply < killers.count else { return }
+            if killers[ply].first == uci { return }
+            killers[ply].insert(uci, at: 0)
+            if killers[ply].count > 2 {
+                killers[ply].removeLast()
+            }
         }
     }
 
@@ -771,6 +907,36 @@ private enum LocalAlphaBetaEngine {
         }
 
         ctx.nodes += 1
+
+        let zKey = OfflineEnginePack.shared.computeZobristHash(for: board)
+        let ttIdx = Int(zKey & 16_383)
+        let ttEntry = ctx.tt[ttIdx]
+        var curAlpha = alpha
+        var curBeta = beta
+        var ttHint: String? = nil
+
+        if ttEntry.key == zKey && ttEntry.flag != 0 {
+            ttHint = ttEntry.bestUCI.isEmpty ? nil : ttEntry.bestUCI
+            if ttEntry.depth >= depth && abs(ttEntry.score) < mateScore - 500 {
+                if ttEntry.flag == 1 {
+                    if let hint = ttHint, let m = board.legalMove(uci: hint) {
+                        pvOut = [m]
+                    }
+                    return ttEntry.score
+                } else if ttEntry.flag == 2 {
+                    curAlpha = max(curAlpha, ttEntry.score)
+                } else if ttEntry.flag == 3 {
+                    curBeta = min(curBeta, ttEntry.score)
+                }
+                if curAlpha >= curBeta {
+                    if let hint = ttHint, let m = board.legalMove(uci: hint) {
+                        pvOut = [m]
+                    }
+                    return ttEntry.score
+                }
+            }
+        }
+
         let legal = board.legalMoves(includeFormattedSAN: false)
 
         if legal.isEmpty {
@@ -780,9 +946,12 @@ private enum LocalAlphaBetaEngine {
             return 0
         }
 
-        let ordered = orderMoves(legal, board: board, pvHintUCI: nil)
-        var bestAlpha = alpha
+        let killerUCIs = ply < ctx.killers.count ? ctx.killers[ply] : []
+        let ordered = orderMoves(legal, board: board, pvHintUCI: ttHint, killerUCIs: killerUCIs)
+        let origAlpha = curAlpha
+        var bestAlpha = curAlpha
         var bestPV: [ChessMove] = []
+        var bestUCI = ordered.first?.uci ?? ""
 
         for move in ordered {
             let next = board.applyingRaw(move)
@@ -791,20 +960,32 @@ private enum LocalAlphaBetaEngine {
                 board: next,
                 depth: depth - 1,
                 ply: ply + 1,
-                alpha: -beta,
+                alpha: -curBeta,
                 beta: -bestAlpha,
                 ctx: ctx,
                 pvOut: &childPV
             )
             if ctx.cancelled { return 0 }
 
-            if score >= beta {
-                return beta
+            if score >= curBeta {
+                if move.capturedPiece == nil && move.promotion == nil {
+                    ctx.recordKiller(move.uci, ply: ply)
+                }
+                if abs(curBeta) < mateScore - 500 {
+                    ctx.tt[ttIdx] = TTEntry(key: zKey, depth: depth, score: curBeta, flag: 2, bestUCI: move.uci)
+                }
+                return curBeta
             }
             if score > bestAlpha {
                 bestAlpha = score
                 bestPV = [move] + childPV
+                bestUCI = move.uci
             }
+        }
+
+        if abs(bestAlpha) < mateScore - 500 {
+            let flag: UInt8 = bestAlpha > origAlpha ? 1 : 3
+            ctx.tt[ttIdx] = TTEntry(key: zKey, depth: depth, score: bestAlpha, flag: flag, bestUCI: bestUCI)
         }
 
         pvOut = bestPV
@@ -854,18 +1035,20 @@ private enum LocalAlphaBetaEngine {
         return bestAlpha
     }
 
-    private static func orderMoves(_ moves: [ChessMove], board: ChessBoardState, pvHintUCI: String?) -> [ChessMove] {
+    private static func orderMoves(_ moves: [ChessMove], board: ChessBoardState, pvHintUCI: String?, killerUCIs: [String] = []) -> [ChessMove] {
         return moves.sorted { a, b in
-            scoreMoveOrder(a, board: board, pvHintUCI: pvHintUCI) > scoreMoveOrder(b, board: board, pvHintUCI: pvHintUCI)
+            scoreMoveOrder(a, board: board, pvHintUCI: pvHintUCI, killerUCIs: killerUCIs) > scoreMoveOrder(b, board: board, pvHintUCI: pvHintUCI, killerUCIs: killerUCIs)
         }
     }
 
-    private static func scoreMoveOrder(_ move: ChessMove, board: ChessBoardState, pvHintUCI: String?) -> Int {
+    private static func scoreMoveOrder(_ move: ChessMove, board: ChessBoardState, pvHintUCI: String?, killerUCIs: [String] = []) -> Int {
         if let hint = pvHintUCI, move.uci == hint { return 1_000_000 }
         var score = 0
         if let captured = move.capturedPiece {
             let attackerValue = board.piece(at: move.from)?.baseValue ?? 100
             score += 10_000 + captured.baseValue * 10 - attackerValue
+        } else if let idx = killerUCIs.firstIndex(of: move.uci) {
+            score += 6_500 - idx * 400
         }
         if let promo = move.promotion {
             score += 8_000 + promo.baseValue
@@ -879,12 +1062,16 @@ private enum LocalAlphaBetaEngine {
         return score
     }
 
-    /// PeSTO Tapered Evaluation from `board.sideToMove` perspective
+    /// PeSTO Tapered Evaluation + Passed Pawns + King Shield + Offline Binary Micro-Tables
     fileprivate static func evaluate(board: ChessBoardState) -> Int {
         var mgWhite = 0, mgBlack = 0
         var egWhite = 0, egBlack = 0
         var phase = 0
         var whiteBishops = 0, blackBishops = 0
+        var whiteKingPos: (r: Int, c: Int)? = nil
+        var blackKingPos: (r: Int, c: Int)? = nil
+        var whitePawnFileMask = Array(repeating: 0, count: 8)
+        var blackPawnFileMask = Array(repeating: 0, count: 8)
 
         for r in 0..<8 {
             for c in 0..<8 {
@@ -901,30 +1088,92 @@ private enum LocalAlphaBetaEngine {
                 case .pawn:
                     mgPST = mgPawnPST[sqIdx]
                     egPST = egPawnPST[sqIdx]
+                    if p.color == .white {
+                        whitePawnFileMask[c] |= (1 << r)
+                    } else {
+                        blackPawnFileMask[c] |= (1 << r)
+                    }
                 case .knight:
                     mgPST = mgKnightPST[sqIdx]
-                    egPST = mgKnightPST[sqIdx]
+                    egPST = egKnightPST[sqIdx]
                 case .bishop:
                     mgPST = mgBishopPST[sqIdx]
-                    egPST = mgBishopPST[sqIdx]
+                    egPST = egBishopPST[sqIdx]
                     if p.color == .white { whiteBishops += 1 } else { blackBishops += 1 }
                 case .rook:
                     mgPST = mgRookPST[sqIdx]
-                    egPST = mgRookPST[sqIdx]
+                    egPST = egRookPST[sqIdx]
                 case .queen:
                     mgPST = mgQueenPST[sqIdx]
-                    egPST = mgQueenPST[sqIdx]
+                    egPST = egQueenPST[sqIdx]
                 case .king:
                     mgPST = mgKingPST[sqIdx]
                     egPST = egKingPST[sqIdx]
+                    if p.color == .white { whiteKingPos = (r, c) } else { blackKingPos = (r, c) }
                 }
 
+                let microAdj = OfflineEnginePack.shared.nnueTableAdjustment(piece: p, row: r, col: c, phase: phase)
                 if p.color == .white {
-                    mgWhite += mgMat + mgPST
-                    egWhite += egMat + egPST
+                    mgWhite += mgMat + mgPST + microAdj
+                    egWhite += egMat + egPST + microAdj
                 } else {
-                    mgBlack += mgMat + mgPST
-                    egBlack += egMat + egPST
+                    mgBlack += mgMat + mgPST + microAdj
+                    egBlack += egMat + egPST + microAdj
+                }
+            }
+        }
+
+        // Passed pawn bonus (weighted towards endgame)
+        let passedBonus = [0, 65, 45, 32, 22, 18, 12, 0]
+        for c in 0..<8 {
+            for r in 1..<7 {
+                guard let p = board.squares[r][c], p.type == .pawn else { continue }
+                let minCol = max(0, c - 1)
+                let maxCol = min(7, c + 1)
+                if p.color == .white {
+                    var blocked = false
+                    for fc in minCol...maxCol {
+                        for ar in 0..<r where (blackPawnFileMask[fc] & (1 << ar)) != 0 {
+                            blocked = true
+                            break
+                        }
+                        if blocked { break }
+                    }
+                    if !blocked {
+                        let bonus = passedBonus[r]
+                        mgWhite += bonus / 2
+                        egWhite += bonus
+                    }
+                } else {
+                    var blocked = false
+                    for fc in minCol...maxCol {
+                        for ar in (r + 1)..<8 where (whitePawnFileMask[fc] & (1 << ar)) != 0 {
+                            blocked = true
+                            break
+                        }
+                        if blocked { break }
+                    }
+                    if !blocked {
+                        let bonus = passedBonus[7 - r]
+                        mgBlack += bonus / 2
+                        egBlack += bonus
+                    }
+                }
+            }
+        }
+
+        // Castled king pawn shield bonus (middlegame)
+        if let wk = whiteKingPos, wk.r == 7 && (wk.c >= 5 || wk.c <= 2) {
+            for fc in max(0, wk.c - 1)...min(7, wk.c + 1) {
+                if (whitePawnFileMask[fc] & ((1 << 6) | (1 << 5))) != 0 {
+                    mgWhite += 14
+                }
+            }
+        }
+        if let bk = blackKingPos, bk.r == 0 && (bk.c >= 5 || bk.c <= 2) {
+            for fc in max(0, bk.c - 1)...min(7, bk.c + 1) {
+                if (blackPawnFileMask[fc] & ((1 << 1) | (1 << 2))) != 0 {
+                    mgBlack += 14
                 }
             }
         }

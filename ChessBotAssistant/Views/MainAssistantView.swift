@@ -54,6 +54,22 @@ struct MainAssistantView: View {
                                 }
 
                                 protectionPill(
+                                    title: "🤖 \(viewModel.engineService.botTargetProfile.shortName)",
+                                    isActive: viewModel.engineService.botTargetProfile != .universal,
+                                    activeColor: .orange
+                                ) {
+                                    viewModel.cycleBotTargetProfile()
+                                }
+
+                                protectionPill(
+                                    title: "🎨 \(viewModel.boardTheme.displayName)",
+                                    isActive: true,
+                                    activeColor: .blue
+                                ) {
+                                    viewModel.cycleBoardTheme()
+                                }
+
+                                protectionPill(
                                     title: "🔮 敵步預測",
                                     isActive: viewModel.engineService.showOpponentReplyArrow,
                                     activeColor: .red
@@ -154,6 +170,7 @@ struct MainAssistantView: View {
                                 isSafetyLocked: viewModel.isFairPlaySafetyLocked,
                                 hangingSquares: Set(viewModel.tacticalRadar.hangingFriendlySquares),
                                 showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
+                                boardTheme: viewModel.boardTheme,
                                 onTapSquare: { square in
                                     viewModel.tapSquare(square)
                                 }
@@ -252,6 +269,12 @@ struct MainAssistantView: View {
                                     viewModel.copyCurrentFEN()
                                 } label: {
                                     Label("📄 複製當前 FEN", systemImage: "square.on.square")
+                                }
+
+                                Button {
+                                    viewModel.copyGamePGNAndReviewReport()
+                                } label: {
+                                    Label("📊 複製整局 PGN 與複盤報告", systemImage: "chart.bar.doc.horizontal")
                                 }
 
                                 Button {
@@ -419,6 +442,14 @@ struct MainAssistantView: View {
                     .lineLimit(1)
 
                 Spacer()
+
+                Text(viewModel.sessionAccuracyText)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(.cyan)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.cyan.opacity(0.15))
+                    .clipShape(Capsule())
 
                 if let quality = viewModel.lastMoveQualityBadge {
                     Text(quality)

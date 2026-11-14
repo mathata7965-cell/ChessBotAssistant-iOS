@@ -39,6 +39,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var latestOpeningName: String = ""
     private var latestThinkRange: String = ""
     private var latestHangingCount: Int = 0
+    private var latestBoardTheme: BoardTheme = .glacierBlue
     private var contentRevision: UInt64 = 0
     private var renderedRevision: UInt64 = 0
     private var cachedPixelBuffer: CVPixelBuffer?
@@ -109,7 +110,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         campReason: String = "",
         openingName: String = "",
         thinkRange: String = "",
-        hangingCount: Int = 0
+        hangingCount: Int = 0,
+        boardTheme: BoardTheme = .glacierBlue
     ) {
         self.latestBoard = board
         self.latestAnalysis = analysis
@@ -124,6 +126,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         self.latestOpeningName = openingName
         self.latestThinkRange = thinkRange
         self.latestHangingCount = hangingCount
+        self.latestBoardTheme = boardTheme
         contentRevision &+= 1
         pushCurrentFrame(forceRedraw: true)
     }
@@ -415,8 +418,10 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             let boardSize: CGFloat = 420
             let cellSize = boardSize / 8.0
 
-            let lightSquareColor = UIColor(red: 0.92, green: 0.93, blue: 0.82, alpha: 1.0)
-            let darkSquareColor = UIColor(red: 0.46, green: 0.59, blue: 0.34, alpha: 1.0)
+            let lRGB = latestBoardTheme.lightRGB
+            let dRGB = latestBoardTheme.darkRGB
+            let lightSquareColor = UIColor(red: lRGB.0, green: lRGB.1, blue: lRGB.2, alpha: 1.0)
+            let darkSquareColor = UIColor(red: dRGB.0, green: dRGB.1, blue: dRGB.2, alpha: 1.0)
             let bestFromHighlight = UIColor(red: 0.97, green: 0.92, blue: 0.36, alpha: 0.48)
             let bestToHighlight = UIColor(red: 0.35, green: 0.88, blue: 0.45, alpha: 0.45)
 

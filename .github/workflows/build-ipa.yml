@@ -22,6 +22,8 @@ jobs:
       - name: Verify Xcode & Generate Project via XcodeGen
         run: |
           xcodebuild -version
+          python3 Scripts/generate_engine_pack.py
+          ls -lh ChessBotAssistant/Resources/OfflineEnginePack.bin
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
           fi

@@ -311,6 +311,78 @@ enum PlayStyleMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum BotTargetProfile: String, CaseIterable, Identifiable, Sendable {
+    case universal = "universal"
+    case antiNelson = "antiNelson"
+    case beginnerCrusher = "beginnerCrusher"
+    case antiMaster = "antiMaster"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .universal: return "通用全能克制"
+        case .antiNelson: return "克制 Nelson (抓早出后)"
+        case .beginnerCrusher: return "速勝低階 Bot (連將壓制)"
+        case .antiMaster: return "高階大師 Bot (零破綻穩健)"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .universal: return "通用Bot"
+        case .antiNelson: return "克Nelson"
+        case .beginnerCrusher: return "速勝Bot"
+        case .antiMaster: return "抗大師"
+        }
+    }
+
+    var tacticTip: String {
+        switch self {
+        case .universal: return "平衡計算子力與位置，適用所有一般電腦對局。"
+        case .antiNelson: return "專門懲罰愛早出皇后的進攻型 Bot，優先出子抓后搶先手。"
+        case .beginnerCrusher: return "優先選擇將軍、吃子與快速攻王路線，迅速結束對局。"
+        case .antiMaster: return "提高兵形結構與王翼安全權重，避免給 2000+ 高階 Bot 反擊機會。"
+        }
+    }
+}
+
+enum BoardTheme: String, CaseIterable, Identifiable, Sendable {
+    case glacierBlue = "glacierBlue"
+    case classicGreen = "classicGreen"
+    case cyberPurple = "cyberPurple"
+    case walnutWood = "walnutWood"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .glacierBlue: return "冰川藍"
+        case .classicGreen: return "經典綠"
+        case .cyberPurple: return "深邃紫"
+        case .walnutWood: return "胡桃木"
+        }
+    }
+
+    var lightRGB: (Double, Double, Double) {
+        switch self {
+        case .glacierBlue: return (0.918, 0.914, 0.898)
+        case .classicGreen: return (0.922, 0.925, 0.816)
+        case .cyberPurple: return (0.890, 0.865, 0.945)
+        case .walnutWood: return (0.941, 0.851, 0.710)
+        }
+    }
+
+    var darkRGB: (Double, Double, Double) {
+        switch self {
+        case .glacierBlue: return (0.298, 0.545, 0.678)
+        case .classicGreen: return (0.467, 0.584, 0.337)
+        case .cyberPurple: return (0.465, 0.365, 0.665)
+        case .walnutWood: return (0.710, 0.533, 0.388)
+        }
+    }
+}
+
 struct TacticalRadarReport: Equatable, Sendable {
     let materialDiffForPerspective: Int
     let capturedByUser: [ChessPiece]

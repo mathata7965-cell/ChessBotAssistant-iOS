@@ -162,6 +162,7 @@ Write-Host "[3/5] 上傳專案檔案至 GitHub (免安裝 Git)..." -ForegroundCo
 $AllFiles = Get-ChildItem -Path $RootDir -File -Recurse -Force | Where-Object {
     $rel = $_.FullName.Substring($RootDir.Length + 1).Replace("\", "/")
     ($rel -notmatch '^(\.git/|build/|ChessBotAssistant\.ipa$|Build-IPA-Cloud\.ps1\.log$|\.github_token\.local$|xcodebuild\.log$)') -and
+    ($_.Name -ne "OfflineEnginePack.bin") -and
     ($_.Extension -ne ".ipa") -and
     ($_.Name -ne ".DS_Store")
 }

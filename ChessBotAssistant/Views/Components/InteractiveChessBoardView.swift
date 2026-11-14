@@ -13,10 +13,19 @@ struct InteractiveChessBoardView: View {
     var isSafetyLocked: Bool = false
     var hangingSquares: Set<BoardSquare> = []
     var showOpponentReplyArrow: Bool = true
+    var boardTheme: BoardTheme = .glacierBlue
     let onTapSquare: (BoardSquare) -> Void
 
-    private let lightSquareColor = Color(red: 0.922, green: 0.925, blue: 0.816) // #EBECD0
-    private let darkSquareColor = Color(red: 0.467, green: 0.584, blue: 0.337)  // #779556
+    private var lightSquareColor: Color {
+        let rgb = boardTheme.lightRGB
+        return Color(red: rgb.0, green: rgb.1, blue: rgb.2)
+    }
+
+    private var darkSquareColor: Color {
+        let rgb = boardTheme.darkRGB
+        return Color(red: rgb.0, green: rgb.1, blue: rgb.2)
+    }
+
     private let files = ["a", "b", "c", "d", "e", "f", "g", "h"]
 
     var body: some View {

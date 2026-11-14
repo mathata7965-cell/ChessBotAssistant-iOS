@@ -73,6 +73,22 @@ struct EngineSettingsSheetView: View {
                         }
                     }
 
+                    Picker("對手 Bot 針對克制", selection: $engineService.botTargetProfile) {
+                        ForEach(BotTargetProfile.allCases) { profile in
+                            Text(profile.displayName).tag(profile)
+                        }
+                    }
+
+                    Text(engineService.botTargetProfile.tacticTip)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Picker("棋盤配色主題 (含 PiP 同步)", selection: $viewModel.boardTheme) {
+                        ForEach(BoardTheme.allCases) { theme in
+                            Text(theme.displayName).tag(theme)
+                        }
+                    }
+
                     Toggle("🔮 顯示對手回應預測箭頭（紅色虛線）", isOn: $engineService.showOpponentReplyArrow)
                         .tint(.red)
 
@@ -133,6 +149,46 @@ struct EngineSettingsSheetView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.vertical, 4)
+                }
+
+                Section("📦 10MB 離線大師引擎包 & Bot 弱點百科") {
+                    let pack = OfflineEnginePack.shared
+                    HStack {
+                        Text("離線引擎包狀態")
+                        Spacer()
+                        Text(pack.isLoaded ? "已載入 (\(pack.packSizeMBString))" : "待載入")
+                            .font(.caption.bold())
+                            .foregroundColor(pack.isLoaded ? Color(red: 0.50, green: 0.78, blue: 0.35) : .orange)
+                    }
+
+                    HStack {
+                        Text("收錄 GM 開局與陷阱定式")
+                        Spacer()
+                        Text("\(pack.bookPositionCount) 個局面")
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+
+                    ForEach(pack.botGuides) { guide in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("\(guide.name) (Elo \(guide.rating))")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.white)
+                                Spacer()
+                                Text(guide.style)
+                                    .font(.caption2)
+                                    .foregroundColor(.cyan)
+                            }
+                            Text("弱點：\(guide.weakness)")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                            Text("反制：\(guide.counterTip)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
                 }
 
                 Section("當前 FEN 資訊") {

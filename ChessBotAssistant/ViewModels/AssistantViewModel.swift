@@ -34,6 +34,16 @@ final class AssistantViewModel: ObservableObject {
     @Published var tacticalRadar: TacticalRadarReport = ChessBoardState.startingPosition.buildTacticalRadar(for: .white, moveHistorySAN: [])
     @Published var evalHistoryWhitePct: [Double] = [50.0]
     @Published var lastMoveQualityBadge: String? = nil
+    @Published var boardTheme: BoardTheme = .glacierBlue
+    @Published var moveAccuracyScores: [Double] = []
+
+    var sessionAccuracyText: String {
+        guard !moveAccuracyScores.isEmpty else {
+            return "離線庫 \(OfflineEnginePack.shared.packSizeMBString)"
+        }
+        let avg = moveAccuracyScores.reduce(0, +) / Double(moveAccuracyScores.count)
+        return "精準 \(Int(avg.rounded()))%"
+    }
 
     @Published var showEngineSettingsSheet: Bool = false
     @Published var showScreenshotScannerSheet: Bool = false
@@ -108,6 +118,17 @@ final class AssistantViewModel: ObservableObject {
             .store(in: &cancellables)
 
         engineService.$playStyleMode
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if !self.engineService.reapplyPlayStyle(for: self.boardState) {
+                    self.triggerAnalysis()
+                }
+            }
+            .store(in: &cancellables)
+
+        engineService.$botTargetProfile
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -223,7 +244,8 @@ final class AssistantViewModel: ObservableObject {
             campReason: detectedCampReason,
             openingName: radar.openingName,
             thinkRange: radar.recommendedThinkRange,
-            hangingCount: radar.hangingFriendlySquares.count
+            hangingCount: radar.hangingFriendlySquares.count,
+            boardTheme: boardTheme
         )
     }
 
@@ -323,6 +345,7 @@ final class AssistantViewModel: ObservableObject {
         safetyLockReason = nil
         evalHistoryWhitePct = [50.0]
         lastMoveQualityBadge = nil
+        moveAccuracyScores.removeAll()
         lastEvaluatedFEN = nil
         previousCampWinPct = nil
         lastSpokenFEN = nil
@@ -411,6 +434,54 @@ final class AssistantViewModel: ObservableObject {
         showBanner("棋風切換：\(engineService.playStyleMode.displayName)")
     }
 
+    func cycleBotTargetProfile() {
+        let all = BotTargetProfile.allCases
+        if let idx = all.firstIndex(of: engineService.botTargetProfile) {
+            engineService.botTargetProfile = all[(idx + 1) % all.count]
+        } else {
+            engineService.botTargetProfile = .universal
+        }
+        showBanner("Bot 克制模式：\(engineService.botTargetProfile.displayName)")
+    }
+
+    func cycleBoardTheme() {
+        let all = BoardTheme.allCases
+        if let idx = all.firstIndex(of: boardTheme) {
+            boardTheme = all[(idx + 1) % all.count]
+        } else {
+            boardTheme = .glacierBlue
+        }
+        syncPiPContent()
+        showBanner("棋盤配色：\(boardTheme.displayName)")
+    }
+
+    func copyGamePGNAndReviewReport() {
+        var pgnMoves: [String] = []
+        for idx in stride(from: 0, to: moveHistorySAN.count, by: 2) {
+            let num = (idx / 2) + 1
+            let whiteSAN = moveHistorySAN[idx]
+            if idx + 1 < moveHistorySAN.count {
+                pgnMoves.append("\(num). \(whiteSAN) \(moveHistorySAN[idx + 1])")
+            } else {
+                pgnMoves.append("\(num). \(whiteSAN)")
+            }
+        }
+        let moveText = pgnMoves.isEmpty ? "(從截圖或 FEN 載入局面)" : pgnMoves.joined(separator: " ")
+        let scoreText = engineService.currentAnalysis?.primaryLine?.formattedScore ?? "0.00"
+        let report = """
+        [Event "Chess.com Bot Match Review"]
+        [Opening "\(tacticalRadar.openingName)"]
+        [Perspective "\(perspective.displayName)"]
+        [Accuracy "\(sessionAccuracyText)"]
+        [Eval "\(scoreText)"]
+        [FEN "\(boardState.toFEN())"]
+
+        \(moveText)
+        """
+        UIPasteboard.general.string = report
+        showBanner("📊 已複製 PGN 與對局複盤報告至剪貼簿")
+    }
+
     private func recordAnalysisTelemetry(_ analysis: EngineAnalysisResult) {
         guard analysis.fen != lastEvaluatedFEN, let primary = analysis.primaryLine else { return }
         lastEvaluatedFEN = analysis.fen
@@ -423,6 +494,8 @@ final class AssistantViewModel: ObservableObject {
         let currentCampPct = primary.winProbability(for: perspective)
         if let prevPct = previousCampWinPct {
             let delta = currentCampPct - prevPct
+            let moveAcc = max(0.0, min(100.0, 100.0 + min(0.0, delta * 2.2)))
+            moveAccuracyScores.append(moveAcc)
             if delta >= 3.0 {
                 lastMoveQualityBadge = "💎 妙手 (+\(Int(delta.rounded()))%)"
             } else if delta >= -1.5 {
