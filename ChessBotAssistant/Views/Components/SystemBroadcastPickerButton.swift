@@ -121,7 +121,6 @@ struct SystemBroadcastPickerButton: View {
                         }
                     }
                 )
-                .frame(width: 1, height: 1)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             )
@@ -174,10 +173,7 @@ private final class BroadcastBridgeHostView: UIView {
 
     func triggerSystemPicker() {
         guard let button = findButton(in: picker) else { return }
-        let hasTouchUpInside = button.allTargets.contains { target in
-            !(button.actions(forTarget: target, forControlEvent: .touchUpInside)?.isEmpty ?? true)
-        }
-        button.sendActions(for: hasTouchUpInside ? .touchUpInside : .allTouchEvents)
+        button.sendActions(for: .touchUpInside)
     }
 
     private func findButton(in root: UIView) -> UIButton? {

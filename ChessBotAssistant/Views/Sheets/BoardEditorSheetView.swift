@@ -106,6 +106,13 @@ struct BoardEditorSheetView: View {
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 12)
+
+                    if !hasValidKings {
+                        Text("請確保棋盤上白王與黑王各恰好有一枚後再套用局面")
+                            .font(.caption.bold())
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 12)
+                    }
                 }
                 .padding(.vertical, 12)
             }
@@ -117,10 +124,12 @@ struct BoardEditorSheetView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("套用局面") {
+                        guard hasValidKings else { return }
                         viewModel.applyCustomBoard(draftBoard)
                         dismiss()
                     }
                     .bold()
+                    .disabled(!hasValidKings)
                 }
             }
             .onAppear {
@@ -128,6 +137,22 @@ struct BoardEditorSheetView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var hasValidKings: Bool {
+        var whiteKings = 0
+        var blackKings = 0
+        for row in draftBoard.squares {
+            for piece in row {
+                guard let piece, piece.type == .king else { continue }
+                if piece.color == .white {
+                    whiteKings += 1
+                } else {
+                    blackKings += 1
+                }
+            }
+        }
+        return whiteKings == 1 && blackKings == 1
     }
 
     private func paletteRow(pieces: [ChessPiece]) -> some View {

@@ -23,9 +23,10 @@ struct EvalBarView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let height = geo.size.height
-            let whiteHeight = height * whiteFraction
-            let blackHeight = height - whiteHeight
+            let height = max(1, geo.size.height)
+            let clampedFraction = whiteFraction.isFinite ? min(1.0, max(0.0, whiteFraction)) : 0.5
+            let whiteHeight = height * clampedFraction
+            let blackHeight = max(0, height - whiteHeight)
 
             ZStack {
                 VStack(spacing: 0) {

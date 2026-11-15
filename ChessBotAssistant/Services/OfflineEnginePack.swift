@@ -107,14 +107,17 @@ final class OfflineEnginePack: @unchecked Sendable {
         self.tableLength = parsedTableLength
         self.zobristKeys = keys
 
-        var precomputed = Array(repeating: 0, count: 4 * 12 * 64)
+        var precomputed = Array(repeating: 0, count: 4 * 16 * 64)
         if parsedTableLength > 2048, let rawData = loadedData {
             for phaseBucket in 0..<4 {
                 for pIdx in 0..<12 {
                     for sq in 0..<64 {
                         let slot = ((phaseBucket * 768 + pIdx * 64 + sq) * 7) % parsedTableLength
                         let rawByte = Int(rawData[parsedTableOffset + slot])
-                        precomputed[(phaseBucket << 10) | (pIdx << 6) | sq] = (rawByte % 7) - 3
+                        let tableIdx = (phaseBucket << 10) | (pIdx << 6) | sq
+                        if tableIdx >= 0 && tableIdx < precomputed.count {
+                            precomputed[tableIdx] = (rawByte % 7) - 3
+                        }
                     }
                 }
             }
@@ -208,9 +211,12 @@ final class OfflineEnginePack: @unchecked Sendable {
     /// O(1) precomputed [-3...3] positional micro-adjustment backed by the mapped binary table.
     @inline(__always)
     func nnueTableAdjustment(piece: ChessPiece, row: Int, col: Int, phase: Int) -> Int {
+        guard row >= 0 && row < 8 && col >= 0 && col < 8 else { return 0 }
         let pIdx = pieceZobristIndex(piece)
         let phaseBucket = min(3, max(0, phase >> 3))
-        return fastNNUETable[(phaseBucket << 10) | (pIdx << 6) | (row << 3) | col]
+        let idx = (phaseBucket << 10) | (pIdx << 6) | (row << 3) | col
+        guard idx >= 0 && idx < fastNNUETable.count else { return 0 }
+        return fastNNUETable[idx]
     }
 
     func lookupBookLines(for board: ChessBoardState, multiPV: Int) -> (lines: [PVLine], openingName: String)? {

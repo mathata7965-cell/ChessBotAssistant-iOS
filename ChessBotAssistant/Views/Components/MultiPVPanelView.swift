@@ -335,8 +335,10 @@ struct MultiPVPanelView: View {
             VStack(spacing: 4) {
                 GeometryReader { geo in
                     let totalW = max(1, geo.size.width)
-                    let winW = totalW * CGFloat(wdl.win) / 100.0
-                    let drawW = totalW * CGFloat(wdl.draw) / 100.0
+                    let safeWin = max(0, min(100, wdl.win))
+                    let safeDraw = max(0, min(100 - safeWin, wdl.draw))
+                    let winW = totalW * CGFloat(safeWin) / 100.0
+                    let drawW = totalW * CGFloat(safeDraw) / 100.0
                     let lossW = max(0, totalW - winW - drawW)
                     HStack(spacing: 1) {
                         Rectangle()

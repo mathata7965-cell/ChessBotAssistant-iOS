@@ -1427,8 +1427,11 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     }
 
     private func drawWDLBar(rect: CGRect, wdl: (win: Int, draw: Int, loss: Int), in cg: CGContext) {
-        let winW = rect.width * CGFloat(wdl.win) / 100.0
-        let drawW = rect.width * CGFloat(wdl.draw) / 100.0
+        guard rect.width > 0 && rect.height > 0 else { return }
+        let safeWin = max(0, min(100, wdl.win))
+        let safeDraw = max(0, min(100 - safeWin, wdl.draw))
+        let winW = rect.width * CGFloat(safeWin) / 100.0
+        let drawW = rect.width * CGFloat(safeDraw) / 100.0
         let lossW = max(0, rect.width - winW - drawW)
         cg.saveGState()
         UIBezierPath(roundedRect: rect, cornerRadius: rect.height / 2.0).addClip()
@@ -1561,8 +1564,10 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         )
         guard sbStatus == noErr, let buffer = sampleBuffer else { return nil }
 
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: true) {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: true),
+           CFArrayGetCount(attachments) > 0,
+           let rawValue = CFArrayGetValueAtIndex(attachments, 0) {
+            let dict = unsafeBitCast(rawValue, to: CFMutableDictionary.self)
             CFDictionarySetValue(
                 dict,
                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),

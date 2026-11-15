@@ -266,6 +266,7 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
             options.deliveryMode = .highQualityFormat
             options.isNetworkAccessAllowed = true
             options.isSynchronous = false
+            let lock = NSLock()
             var resumed = false
 
             PHImageManager.default().requestImage(
@@ -275,9 +276,19 @@ final class PhotoLibraryScreenshotMonitor: NSObject, ObservableObject, PHPhotoLi
                 options: options
             ) { image, info in
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if !isDegraded && !resumed {
+                let isCancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                let hasError = info?[PHImageErrorKey] != nil
+                guard !isDegraded || isCancelled || hasError else { return }
+
+                lock.lock()
+                let shouldResume = !resumed
+                if shouldResume {
                     resumed = true
-                    continuation.resume(returning: image)
+                }
+                lock.unlock()
+
+                if shouldResume {
+                    continuation.resume(returning: isCancelled ? nil : image)
                 }
             }
         }

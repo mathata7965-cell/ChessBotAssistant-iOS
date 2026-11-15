@@ -20,7 +20,7 @@ struct MoveArrowOverlayView: View {
     var body: some View {
         GeometryReader { geo in
             if showArrows && !isSafetyLocked && !coachPieceOnlyMode && !pvLines.isEmpty {
-                let size = min(geo.size.width, geo.size.height)
+                let size = max(16, min(geo.size.width, geo.size.height))
                 let cell = size / 8.0
 
                 Canvas { context, _ in

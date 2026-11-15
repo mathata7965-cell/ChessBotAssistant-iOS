@@ -440,12 +440,18 @@ struct MainAssistantView: View {
                 .sheet(isPresented: $viewModel.showEngineSettingsSheet) {
                     EngineSettingsSheetView(viewModel: viewModel)
                 }
-                .sheet(isPresented: $viewModel.showScreenshotScannerSheet) {
-                    ScreenshotScannerSheetView(viewModel: viewModel)
-                }
-                .sheet(isPresented: $viewModel.showBoardEditorSheet) {
-                    BoardEditorSheetView(viewModel: viewModel)
-                }
+                .background(
+                    Color.clear
+                        .sheet(isPresented: $viewModel.showScreenshotScannerSheet) {
+                            ScreenshotScannerSheetView(viewModel: viewModel)
+                        }
+                )
+                .background(
+                    Color.clear
+                        .sheet(isPresented: $viewModel.showBoardEditorSheet) {
+                            BoardEditorSheetView(viewModel: viewModel)
+                        }
+                )
                 .fullScreenCover(isPresented: $viewModel.showFullScreenBigBoard) {
                     FullScreenTacticalBoardView(
                         viewModel: viewModel,
@@ -642,8 +648,10 @@ struct MainAssistantView: View {
             VStack(spacing: 4) {
                 GeometryReader { geo in
                     let totalW = max(1, geo.size.width)
-                    let winW = totalW * CGFloat(wdl.win) / 100.0
-                    let drawW = totalW * CGFloat(wdl.draw) / 100.0
+                    let safeWin = max(0, min(100, wdl.win))
+                    let safeDraw = max(0, min(100 - safeWin, wdl.draw))
+                    let winW = totalW * CGFloat(safeWin) / 100.0
+                    let drawW = totalW * CGFloat(safeDraw) / 100.0
                     let lossW = max(0, totalW - winW - drawW)
                     HStack(spacing: 1) {
                         Rectangle()
@@ -1039,8 +1047,8 @@ struct MainAssistantView: View {
                         .foregroundColor(.white)
 
                     GeometryReader { geo in
-                        let w = geo.size.width
-                        let h = geo.size.height
+                        let w = max(1, geo.size.width)
+                        let h = max(1, geo.size.height)
                         ZStack {
                             Path { path in
                                 path.move(to: CGPoint(x: 0, y: h * 0.5))
@@ -1051,8 +1059,9 @@ struct MainAssistantView: View {
                             if points.count >= 2 {
                                 Path { path in
                                     for (idx, val) in points.enumerated() {
+                                        let finiteVal = val.isFinite ? val : 50.0
                                         let x = w * CGFloat(idx) / CGFloat(max(1, points.count - 1))
-                                        let y = h * (1.0 - CGFloat(min(100.0, max(0.0, val))) / 100.0)
+                                        let y = h * (1.0 - CGFloat(min(100.0, max(0.0, finiteVal))) / 100.0)
                                         if idx == 0 {
                                             path.move(to: CGPoint(x: x, y: y))
                                         } else {
@@ -1069,7 +1078,8 @@ struct MainAssistantView: View {
                                     style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
                                 )
                             } else if let onlyVal = points.first {
-                                let y = h * (1.0 - CGFloat(min(100.0, max(0.0, onlyVal))) / 100.0)
+                                let finiteVal = onlyVal.isFinite ? onlyVal : 50.0
+                                let y = h * (1.0 - CGFloat(min(100.0, max(0.0, finiteVal))) / 100.0)
                                 Circle()
                                     .fill(Color.cyan)
                                     .frame(width: 5, height: 5)
@@ -1530,8 +1540,10 @@ private struct FullScreenTacticalBoardView: View {
 
                     GeometryReader { barGeo in
                         let w = max(1, barGeo.size.width)
-                        let winW = w * CGFloat(wdl.win) / 100.0
-                        let drawW = w * CGFloat(wdl.draw) / 100.0
+                        let safeWin = max(0, min(100, wdl.win))
+                        let safeDraw = max(0, min(100 - safeWin, wdl.draw))
+                        let winW = w * CGFloat(safeWin) / 100.0
+                        let drawW = w * CGFloat(safeDraw) / 100.0
                         let lossW = max(0, w - winW - drawW)
                         HStack(spacing: 1) {
                             Rectangle().fill(Color(red: 0.30, green: 0.86, blue: 0.44)).frame(width: winW)
@@ -1578,9 +1590,8 @@ private struct FullScreenTacticalBoardView: View {
                     ? viewModel.boardState.explainMoveTactics(primary.bestMove)
                     : primary.tacticalReason
                 let replyStr = (viewModel.engineService.showOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
-                let msTag = (viewModel.engineService.currentAnalysis?.searchTimeMs ?? 0) > 0
-                    ? " · \(viewModel.engineService.currentAnalysis!.searchTimeMs)ms"
-                    : ""
+                let currentSearchMs = viewModel.engineService.currentAnalysis?.searchTimeMs ?? 0
+                let msTag = currentSearchMs > 0 ? " · \(currentSearchMs)ms" : ""
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {

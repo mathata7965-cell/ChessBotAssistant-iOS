@@ -30,7 +30,7 @@ struct InteractiveChessBoardView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let boardSize = min(geo.size.width, geo.size.height)
+            let boardSize = max(16, min(geo.size.width, geo.size.height))
             let cellSize = boardSize / 8.0
 
             ZStack {
