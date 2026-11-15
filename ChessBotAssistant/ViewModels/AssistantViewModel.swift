@@ -3,6 +3,19 @@ import Combine
 import Foundation
 import SwiftUI
 import UIKit
+import UserNotifications
+
+final class TacticalBannerNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = TacticalBannerNotificationDelegate()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list])
+    }
+}
 
 @MainActor
 final class AssistantViewModel: ObservableObject {
@@ -37,6 +50,9 @@ final class AssistantViewModel: ObservableObject {
     @Published var boardTheme: BoardTheme = .glacierBlue
     @Published var moveAccuracyScores: [Double] = []
     @Published var isBoardDetected: Bool = false
+    @Published var bigScreenBannerPromptEnabled: Bool = true
+    @Published var pipBigScreenBoardMode: Bool = false
+    @Published var showFullScreenBigBoard: Bool = false
     @Published var lastKnownWinPct: Int = 50
     @Published var lastKnownWDL: (win: Int, draw: Int, loss: Int) = (38, 24, 38)
     @Published var lastKnownEvalStr: String = "0.00"
@@ -103,6 +119,7 @@ final class AssistantViewModel: ObservableObject {
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var lastSpokenFEN: String?
     private var lastEvaluatedFEN: String?
+    private var lastNotifiedBannerKey: String = ""
     private var previousCampWinPct: Double?
     private var pendingBroadcastKey: String?
     private var pendingBroadcastCount: Int = 0
@@ -111,6 +128,8 @@ final class AssistantViewModel: ObservableObject {
     private var paceTimer: Timer?
 
     init() {
+        UNUserNotificationCenter.current().delegate = TacticalBannerNotificationDelegate.shared
+        requestBannerNotificationPermissionIfNeeded()
         setupBindings()
         syncPiPContent()
         Task { @MainActor [weak self] in
@@ -121,6 +140,10 @@ final class AssistantViewModel: ObservableObject {
                 self.syncPiPContent()
             }
         }
+    }
+
+    private func requestBannerNotificationPermissionIfNeeded() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge]) { _, _ in }
     }
 
     private func setupBindings() {
@@ -159,6 +182,7 @@ final class AssistantViewModel: ObservableObject {
                 if let analysis {
                     self.recordAnalysisTelemetry(analysis)
                     self.speakMoveAnnouncementIfNeeded(analysis)
+                    self.postBigScreenTacticalBannerIfNeeded(analysis)
                 }
                 self.syncPiPContent()
             }
@@ -303,6 +327,7 @@ final class AssistantViewModel: ObservableObject {
         tacticalRadar = radar
         pipManager.updateContent(
             board: boardState,
+            lastMove: lastMove,
             analysis: engineService.currentAnalysis,
             perspective: perspective,
             autoHintEnabled: engineService.autoHintEnabled,
@@ -320,6 +345,7 @@ final class AssistantViewModel: ObservableObject {
             pinnedCount: radar.pinnedPieces.count,
             isWaitingForOpponentReply: isWaitingForOpponentReply,
             isBoardDetected: isBoardDetected,
+            bigScreenBoardMode: pipBigScreenBoardMode,
             isAnalyzing: engineService.isAnalyzing,
             paceRemainingSeconds: paceRemainingSeconds,
             stealthSafetyScore: stealthSafetyScore,
@@ -473,10 +499,12 @@ final class AssistantViewModel: ObservableObject {
             showBanner("目前沒有可走的最佳步")
             return
         }
+        isBoardDetected = true
         applyMove(best)
     }
 
     func playPVLine(_ line: PVLine) {
+        isBoardDetected = true
         applyMove(line.bestMove)
     }
 
@@ -513,6 +541,7 @@ final class AssistantViewModel: ObservableObject {
         lastMoveQualityBadge = nil
         moveAccuracyScores.removeAll()
         lastEvaluatedFEN = nil
+        lastNotifiedBannerKey = ""
         previousCampWinPct = nil
         lastSpokenFEN = nil
         pendingBroadcastKey = nil
@@ -521,6 +550,8 @@ final class AssistantViewModel: ObservableObject {
         lastAcceptedMoveTime = 0
         clearSelection()
         engineService.clearAnalysis()
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["chess.tactical.live.banner"])
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["chess.tactical.live.banner"])
         syncPiPContent()
         showBanner("已重置並等待偵測棋盤")
     }
@@ -723,6 +754,76 @@ final class AssistantViewModel: ObservableObject {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
         speechSynthesizer.speak(utterance)
+    }
+
+    func toggleBigScreenBannerPrompt() {
+        bigScreenBannerPromptEnabled.toggle()
+        if !bigScreenBannerPromptEnabled {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["chess.tactical.live.banner"])
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["chess.tactical.live.banner"])
+            showBanner("已關閉大螢幕頂部即時橫幅通知")
+        } else {
+            requestBannerNotificationPermissionIfNeeded()
+            lastNotifiedBannerKey = ""
+            if let analysis = engineService.currentAnalysis {
+                postBigScreenTacticalBannerIfNeeded(analysis)
+            }
+            showBanner("已開啟大螢幕頂部即時戰術橫幅")
+        }
+        syncPiPContent()
+    }
+
+    func togglePiPBigScreenBoardMode() {
+        pipBigScreenBoardMode.toggle()
+        showBanner(pipBigScreenBoardMode ? "懸浮窗切換：大螢幕巨型棋盤模式" : "懸浮窗切換：左棋盤 + 右勝率雙顯模式")
+        syncPiPContent()
+    }
+
+    private func postBigScreenTacticalBannerIfNeeded(_ analysis: EngineAnalysisResult) {
+        guard bigScreenBannerPromptEnabled,
+              isBoardDetected,
+              !isFairPlaySafetyLocked,
+              !isWaitingForOpponentReply,
+              engineService.autoHintEnabled,
+              let primary = analysis.primaryLine else {
+            return
+        }
+
+        let key = "\(analysis.fen)|\(primary.bestMove.uci)|\(engineService.coachPieceOnlyHintMode)"
+        guard key != lastNotifiedBannerKey else { return }
+        lastNotifiedBannerKey = key
+
+        let gamePly = max(1, (boardState.fullMoveNumber - 1) * 2 + (boardState.sideToMove == .white ? 0 : 1))
+        let winPct = Int(primary.winProbability(for: perspective).rounded())
+        let wdl = primary.wdlBreakdown(for: perspective, gamePhasePly: gamePly)
+        let movingPiece = boardState.piece(at: primary.bestMove.from)
+        let pieceName = movingPiece?.type.fullChineseName ?? "棋子"
+
+        let posHint = engineService.coachPieceOnlyHintMode
+            ? primary.bestMove.from.relativePositionHint(for: perspective)
+            : "\(primary.bestMove.from.relativePositionHint(for: perspective)) -> \(primary.bestMove.to.relativePositionHint(for: perspective))"
+
+        let reasonText = primary.tacticalReason.isEmpty
+            ? boardState.explainMoveTactics(primary.bestMove)
+            : primary.tacticalReason
+        let replySAN = (engineService.showOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
+
+        let content = UNMutableNotificationContent()
+        if engineService.coachPieceOnlyHintMode {
+            content.title = "勝率 \(winPct)% (\(primary.formattedScore))｜建議動：\(pieceName) (\(primary.bestMove.from.algebraic))"
+        } else {
+            content.title = "勝率 \(winPct)% (\(primary.formattedScore))｜\(pieceName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]"
+        }
+        content.subtitle = "螢幕位置：\(posHint)｜勝\(wdl.win)% 和\(wdl.draw)% 負\(wdl.loss)%"
+        content.body = "戰術目的：\(reasonText)｜預計敵應：\(replySAN)"
+        content.interruptionLevel = .active
+
+        let request = UNNotificationRequest(
+            identifier: "chess.tactical.live.banner",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     func toggleSideToMove() {

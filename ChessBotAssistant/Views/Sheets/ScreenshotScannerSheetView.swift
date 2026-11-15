@@ -56,7 +56,7 @@ struct ScreenshotScannerSheetView: View {
                                 Spacer()
                             }
 
-                            HStack(spacing: 12) {
+                            HStack(spacing: 10) {
                                 if let croppedPreviewImage {
                                     VStack(spacing: 4) {
                                         Text("截圖擷取區")
@@ -70,41 +70,64 @@ struct ScreenshotScannerSheetView: View {
                                     .frame(maxWidth: .infinity)
                                 }
 
-                                VStack(alignment: .leading, spacing: 8) {
+                                VStack(spacing: 4) {
+                                    Text("AI 辨識重建棋盤")
+                                        .font(.caption2)
+                                        .foregroundColor(Color(red: 0.52, green: 0.88, blue: 0.48))
+                                    InteractiveChessBoardView(
+                                        boardState: board,
+                                        perspective: detectedPerspective,
+                                        selectedSquare: nil,
+                                        legalTargets: [],
+                                        lastMove: nil,
+                                        pvLines: [],
+                                        showAutoHintArrows: false,
+                                        highlightedPVIndex: nil,
+                                        boardTheme: viewModel.boardTheme,
+                                        onTapSquare: { _ in }
+                                    )
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
                                     Label("已偵測棋盤", systemImage: "checkmark.circle.fill")
                                         .font(.caption.bold())
                                         .foregroundColor(Color(red: 0.52, green: 0.88, blue: 0.48))
-
+                                    Spacer()
                                     let pieceTotal = board.squares.flatMap { $0 }.compactMap { $0 }.count
+                                    Text("辨識棋子：\(pieceTotal) 枚")
+                                        .font(.caption2.bold())
+                                        .foregroundColor(.cyan)
+                                }
+
+                                HStack {
                                     Text("我方視角：執\(detectedPerspective.displayName)")
                                         .font(.caption.bold())
                                         .foregroundColor(.white)
-
-                                    Text("辨識棋子：\(pieceTotal) 枚")
-                                        .font(.caption2)
-                                        .foregroundColor(.cyan)
-
+                                    Spacer()
                                     Text("輪到：\(selectedTurn.displayName)")
                                         .font(.caption2)
                                         .foregroundColor(Color(white: 0.80))
-
-                                    if let rec = latestRecognizedResult {
-                                        Text(rec.campDetectionReason)
-                                            .font(.caption2)
-                                            .foregroundColor(Color(white: 0.68))
-                                            .lineLimit(2)
-                                    }
-
-                                    Text(board.toFEN())
-                                        .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.58))
-                                        .lineLimit(3)
                                 }
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.white.opacity(0.06))
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                                if let rec = latestRecognizedResult {
+                                    Text(rec.campDetectionReason)
+                                        .font(.caption2)
+                                        .foregroundColor(Color(white: 0.68))
+                                        .lineLimit(2)
+                                }
+
+                                Text(board.toFEN())
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundColor(Color(white: 0.58))
+                                    .lineLimit(2)
                             }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.white.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
 
                             Picker("目前輪到誰走？", selection: $selectedTurn) {
                                 Text("輪到白方").tag(PieceColor.white)

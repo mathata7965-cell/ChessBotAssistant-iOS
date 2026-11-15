@@ -96,6 +96,33 @@ struct MainAssistantView: View {
                                         viewModel.engineService.zeroNetworkIsolationMode.toggle()
                                         viewModel.triggerAnalysis()
                                     }
+
+                                    protectionPill(
+                                        title: "大螢幕橫幅",
+                                        icon: "rectangle.topthird.inset.filled",
+                                        isActive: viewModel.bigScreenBannerPromptEnabled,
+                                        activeColor: .cyan
+                                    ) {
+                                        viewModel.toggleBigScreenBannerPrompt()
+                                    }
+
+                                    protectionPill(
+                                        title: viewModel.pipBigScreenBoardMode ? "PiP 巨型盤" : "PiP 雙顯盤",
+                                        icon: "rectangle.inset.filled",
+                                        isActive: viewModel.pipBigScreenBoardMode,
+                                        activeColor: .indigo
+                                    ) {
+                                        viewModel.togglePiPBigScreenBoardMode()
+                                    }
+
+                                    protectionPill(
+                                        title: "配色:\(viewModel.boardTheme.displayName)",
+                                        icon: "paintpalette.fill",
+                                        isActive: true,
+                                        activeColor: .yellow
+                                    ) {
+                                        viewModel.cycleBoardTheme()
+                                    }
                                 }
                             }
                             .opacity(cardsRevealed ? 1 : 0)
@@ -159,7 +186,7 @@ struct MainAssistantView: View {
                                 .transition(.opacity)
                             }
 
-                            // 2. Conditional Hero Dashboard (Board-Free HUD)
+                            // 2. Conditional Hero Dashboard & Detected Chessboard
                             if !viewModel.isBoardDetected {
                                 waitingForBoardDetectionCard
                                     .opacity(cardsRevealed ? 1 : 0)
@@ -169,42 +196,72 @@ struct MainAssistantView: View {
                                     .opacity(cardsRevealed ? 1 : 0)
                                     .scaleEffect(cardsRevealed ? 1 : 0.98)
 
-                                // 3. Action Strip (Board-Free Tactical Actions)
+                                detectedBoardSection
+                                    .opacity(cardsRevealed ? 1 : 0)
+                                    .scaleEffect(cardsRevealed ? 1 : 0.98)
+
+                                // 3. Action Strip
                                 HStack(spacing: 6) {
                                     actionChip(
-                                        title: "王受阻換步",
-                                        icon: "arrow.triangle.branch",
-                                        tint: .orange,
+                                        title: "走最佳",
+                                        icon: "play.fill",
+                                        tint: accentGreen,
                                         highlighted: true
+                                    ) {
+                                        viewModel.playBestMove()
+                                    }
+
+                                    actionChip(
+                                        title: "換步",
+                                        icon: "arrow.triangle.branch",
+                                        tint: .orange
                                     ) {
                                         viewModel.skipBlockedMoveAndReanalyze()
                                     }
 
                                     actionChip(
-                                        title: "立即重算",
-                                        icon: "arrow.clockwise",
-                                        tint: accentGreen
+                                        title: "大螢幕",
+                                        icon: "arrow.up.left.and.arrow.down.right",
+                                        tint: .cyan
                                     ) {
-                                        viewModel.forceAnalyzeNow()
+                                        viewModel.showFullScreenBigBoard = true
                                     }
 
                                     actionChip(
-                                        title: "執\(viewModel.perspective == .white ? "白" : "黑")",
-                                        icon: "arrow.up.arrow.down",
+                                        title: "悔棋",
+                                        icon: "arrow.uturn.backward",
                                         tint: .white
                                     ) {
-                                        viewModel.flipPerspective()
+                                        viewModel.undoLastMove()
                                     }
 
                                     actionChip(
-                                        title: "重置待機",
+                                        title: "待機",
                                         icon: "viewfinder",
-                                        tint: .cyan
+                                        tint: Color(white: 0.80)
                                     ) {
                                         viewModel.resetBoard()
                                     }
 
                                     Menu {
+                                        Button {
+                                            viewModel.forceAnalyzeNow()
+                                        } label: {
+                                            Label("立即重算當前局面", systemImage: "arrow.clockwise")
+                                        }
+
+                                        Button {
+                                            viewModel.flipPerspective()
+                                        } label: {
+                                            Label("切換我方視角（目前：執\(viewModel.perspective == .white ? "白" : "黑")）", systemImage: "arrow.up.arrow.down")
+                                        }
+
+                                        Button {
+                                            viewModel.showBoardEditorSheet = true
+                                        } label: {
+                                            Label("手動擺盤與微調", systemImage: "square.grid.3x3.topleft.filled")
+                                        }
+
                                         Button {
                                             viewModel.showScreenshotScannerSheet = true
                                         } label: {
@@ -380,6 +437,29 @@ struct MainAssistantView: View {
                 }
                 .sheet(isPresented: $viewModel.showScreenshotScannerSheet) {
                     ScreenshotScannerSheetView(viewModel: viewModel)
+                }
+                .sheet(isPresented: $viewModel.showBoardEditorSheet) {
+                    BoardEditorSheetView(viewModel: viewModel)
+                }
+                .fullScreenCover(isPresented: $viewModel.showFullScreenBigBoard) {
+                    FullScreenTacticalBoardView(
+                        viewModel: viewModel,
+                        highlightedPVIndex: $highlightedPVIndex
+                    )
+                }
+                .confirmationDialog(
+                    "選擇升變棋子",
+                    isPresented: Binding(
+                        get: { viewModel.pendingPromotionPair != nil },
+                        set: { if !$0 { viewModel.pendingPromotionPair = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("皇后 (Queen)") { viewModel.completePendingPromotion(with: .queen) }
+                    Button("城堡 (Rook)") { viewModel.completePendingPromotion(with: .rook) }
+                    Button("主教 (Bishop)") { viewModel.completePendingPromotion(with: .bishop) }
+                    Button("騎士 (Knight)") { viewModel.completePendingPromotion(with: .knight) }
+                    Button("取消", role: .cancel) { viewModel.pendingPromotionPair = nil }
                 }
                 .alert("輸入 FEN 或 PGN 局面", isPresented: $viewModel.showFENInputAlert) {
                     TextField("貼上 FEN 或 PGN 文字", text: $viewModel.fenInputText)
@@ -596,6 +676,131 @@ struct MainAssistantView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(winTint.opacity(0.30), lineWidth: 1.2)
+        )
+    }
+
+    private var detectedBoardSection: some View {
+        let campText = viewModel.perspective == .white ? "白方視角" : "黑方視角"
+        let activeLines = viewModel.isWaitingForOpponentReply ? [] : (viewModel.engineService.currentAnalysis?.lines ?? [])
+
+        return VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accentGreen)
+                    .frame(width: 7, height: 7)
+
+                Text("已偵測實戰棋盤 · \(campText)")
+                    .font(.caption.bold())
+                    .foregroundColor(.white)
+
+                Spacer()
+
+                Button {
+                    viewModel.flipPerspective()
+                } label: {
+                    Label("翻轉", systemImage: "arrow.up.arrow.down")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.08))
+                        .foregroundColor(.white)
+                        .clipShape(Capsule())
+                }
+
+                Button {
+                    viewModel.showFullScreenBigBoard = true
+                } label: {
+                    Label("大螢幕全屏", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.cyan.opacity(0.18))
+                        .foregroundColor(.cyan)
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(alignment: .center, spacing: 8) {
+                EvalBarView(
+                    analysis: viewModel.engineService.currentAnalysis,
+                    perspective: viewModel.perspective,
+                    isAnalyzing: viewModel.engineService.isAnalyzing
+                )
+
+                InteractiveChessBoardView(
+                    boardState: viewModel.boardState,
+                    perspective: viewModel.perspective,
+                    selectedSquare: viewModel.selectedSquare,
+                    legalTargets: viewModel.legalTargetsForSelection,
+                    lastMove: viewModel.lastMove,
+                    pvLines: activeLines,
+                    showAutoHintArrows: viewModel.engineService.autoHintEnabled && !viewModel.isWaitingForOpponentReply,
+                    highlightedPVIndex: highlightedPVIndex,
+                    coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
+                    isSafetyLocked: viewModel.isFairPlaySafetyLocked,
+                    hangingSquares: Set(viewModel.tacticalRadar.hangingFriendlySquares),
+                    showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
+                    boardTheme: viewModel.boardTheme,
+                    onTapSquare: { square in
+                        viewModel.tapSquare(square)
+                    }
+                )
+            }
+            .aspectRatio(1.09, contentMode: .fit)
+
+            // Big-Screen Overlay Modes Quick Switch Bar
+            HStack(spacing: 6) {
+                Button {
+                    viewModel.toggleBigScreenBannerPrompt()
+                } label: {
+                    Label(
+                        "頂部橫幅:\(viewModel.bigScreenBannerPromptEnabled ? "開" : "關")",
+                        systemImage: "rectangle.topthird.inset.filled"
+                    )
+                    .font(.system(size: 10.5, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(viewModel.bigScreenBannerPromptEnabled ? Color.cyan.opacity(0.16) : Color.white.opacity(0.06))
+                    .foregroundColor(viewModel.bigScreenBannerPromptEnabled ? .cyan : Color(white: 0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
+                Button {
+                    viewModel.togglePiPBigScreenBoardMode()
+                } label: {
+                    Label(
+                        "懸浮:\(viewModel.pipBigScreenBoardMode ? "巨型盤" : "雙顯盤")",
+                        systemImage: "pip.fill"
+                    )
+                    .font(.system(size: 10.5, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(viewModel.pipBigScreenBoardMode ? Color.indigo.opacity(0.24) : Color.white.opacity(0.06))
+                    .foregroundColor(viewModel.pipBigScreenBoardMode ? Color(red: 0.68, green: 0.72, blue: 1.0) : Color(white: 0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
+                Button {
+                    viewModel.showBoardEditorSheet = true
+                } label: {
+                    Label("擺盤微調", systemImage: "square.grid.3x3.topleft.filled")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.06))
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(red: 0.11, green: 0.145, blue: 0.19))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(accentGreen.opacity(0.25), lineWidth: 1.2)
         )
     }
 
@@ -963,5 +1168,265 @@ private struct LaunchIntroOverlayView: View {
                 barProgress = 1.0
             }
         }
+    }
+}
+
+private struct FullScreenTacticalBoardView: View {
+    @ObservedObject var viewModel: AssistantViewModel
+    @Binding var highlightedPVIndex: Int?
+    @Environment(\.dismiss) private var dismiss
+
+    private let accentGreen = Color(red: 0.506, green: 0.714, blue: 0.298)
+
+    var body: some View {
+        let primary = viewModel.engineService.currentAnalysis?.primaryLine
+        let gamePly = max(1, (viewModel.boardState.fullMoveNumber - 1) * 2 + (viewModel.boardState.sideToMove == .white ? 0 : 1))
+        let winPct = primary.map { Int($0.winProbability(for: viewModel.perspective).rounded()) } ?? viewModel.lastKnownWinPct
+        let wdl = primary?.wdlBreakdown(for: viewModel.perspective, gamePhasePly: gamePly) ?? viewModel.lastKnownWDL
+        let evalStr = primary?.formattedScore ?? viewModel.lastKnownEvalStr
+        let winTint: Color = winPct >= 52 ? accentGreen : (winPct >= 44 ? .yellow : Color(red: 0.96, green: 0.45, blue: 0.45))
+        let activeLines = viewModel.isWaitingForOpponentReply ? [] : (viewModel.engineService.currentAnalysis?.lines ?? [])
+
+        ZStack {
+            Color(red: 0.055, green: 0.068, blue: 0.088)
+                .ignoresSafeArea()
+
+            GeometryReader { geo in
+                let isLandscape = geo.size.width > geo.size.height
+
+                VStack(spacing: 10) {
+                    // Top Bar
+                    HStack(spacing: 10) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(accentGreen)
+                                .frame(width: 8, height: 8)
+                            Text("大螢幕戰術投影 · \(viewModel.perspective == .white ? "執白" : "執黑")")
+                                .font(.subheadline.bold())
+                                .foregroundColor(.white)
+                        }
+
+                        Spacer()
+
+                        Button {
+                            viewModel.toggleBigScreenBannerPrompt()
+                        } label: {
+                            Label(
+                                "頂部橫幅:\(viewModel.bigScreenBannerPromptEnabled ? "開" : "關")",
+                                systemImage: "rectangle.topthird.inset.filled"
+                            )
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(viewModel.bigScreenBannerPromptEnabled ? Color.cyan.opacity(0.20) : Color.white.opacity(0.08))
+                            .foregroundColor(viewModel.bigScreenBannerPromptEnabled ? .cyan : .white)
+                            .clipShape(Capsule())
+                        }
+
+                        Button {
+                            viewModel.showFullScreenBigBoard = false
+                            dismiss()
+                        } label: {
+                            Label("退出全屏", systemImage: "xmark.circle.fill")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.red.opacity(0.24))
+                                .foregroundColor(.white)
+                                .clipShape(Capsule())
+                        }
+                    }
+
+                    if isLandscape {
+                        HStack(spacing: 16) {
+                            boardBlock(activeLines: activeLines)
+                                .frame(maxWidth: geo.size.height * 0.85, maxHeight: .infinity)
+
+                            hudBlock(primary: primary, winPct: winPct, wdl: wdl, evalStr: evalStr, winTint: winTint)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    } else {
+                        hudBlock(primary: primary, winPct: winPct, wdl: wdl, evalStr: evalStr, winTint: winTint)
+
+                        Spacer(minLength: 0)
+
+                        boardBlock(activeLines: activeLines)
+
+                        Spacer(minLength: 0)
+                    }
+
+                    // Bottom Action Strip
+                    HStack(spacing: 8) {
+                        Button {
+                            viewModel.playBestMove()
+                        } label: {
+                            Label("走最佳步", systemImage: "play.fill")
+                                .font(.subheadline.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(accentGreen)
+                                .foregroundColor(Color(red: 0.05, green: 0.08, blue: 0.04))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+
+                        Button {
+                            viewModel.skipBlockedMoveAndReanalyze()
+                        } label: {
+                            Label("王受阻換步", systemImage: "arrow.triangle.branch")
+                                .font(.subheadline.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color.orange.opacity(0.24))
+                                .foregroundColor(.orange)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+
+                        Button {
+                            viewModel.flipPerspective()
+                        } label: {
+                            Label("翻轉視角", systemImage: "arrow.up.arrow.down")
+                                .font(.subheadline.bold())
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(Color.white.opacity(0.10))
+                                .foregroundColor(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+                .padding(12)
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func boardBlock(activeLines: [PVLine]) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            EvalBarView(
+                analysis: viewModel.engineService.currentAnalysis,
+                perspective: viewModel.perspective,
+                isAnalyzing: viewModel.engineService.isAnalyzing
+            )
+
+            InteractiveChessBoardView(
+                boardState: viewModel.boardState,
+                perspective: viewModel.perspective,
+                selectedSquare: viewModel.selectedSquare,
+                legalTargets: viewModel.legalTargetsForSelection,
+                lastMove: viewModel.lastMove,
+                pvLines: activeLines,
+                showAutoHintArrows: viewModel.engineService.autoHintEnabled && !viewModel.isWaitingForOpponentReply,
+                highlightedPVIndex: highlightedPVIndex,
+                coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
+                isSafetyLocked: viewModel.isFairPlaySafetyLocked,
+                hangingSquares: Set(viewModel.tacticalRadar.hangingFriendlySquares),
+                showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
+                boardTheme: viewModel.boardTheme,
+                onTapSquare: { square in
+                    viewModel.tapSquare(square)
+                }
+            )
+        }
+    }
+
+    private func hudBlock(
+        primary: PVLine?,
+        winPct: Int,
+        wdl: (win: Int, draw: Int, loss: Int),
+        evalStr: String,
+        winTint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("我方勝率")
+                        .font(.caption.bold())
+                        .foregroundColor(.cyan)
+                    Text("\(winPct)%")
+                        .font(.system(size: 40, weight: .heavy, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(winTint)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text("評估 \(evalStr)")
+                            .font(.headline.monospaced())
+                            .foregroundColor(.white)
+                        Spacer()
+                        Text("勝\(wdl.win)% 和\(wdl.draw)% 負\(wdl.loss)%")
+                            .font(.caption.bold().monospacedDigit())
+                            .foregroundColor(Color(white: 0.85))
+                    }
+
+                    GeometryReader { barGeo in
+                        let w = max(1, barGeo.size.width)
+                        let winW = w * CGFloat(wdl.win) / 100.0
+                        let drawW = w * CGFloat(wdl.draw) / 100.0
+                        let lossW = max(0, w - winW - drawW)
+                        HStack(spacing: 1) {
+                            Rectangle().fill(Color(red: 0.30, green: 0.86, blue: 0.44)).frame(width: winW)
+                            Rectangle().fill(Color(white: 0.48)).frame(width: drawW)
+                            Rectangle().fill(Color(red: 0.92, green: 0.34, blue: 0.38)).frame(width: lossW)
+                        }
+                        .clipShape(Capsule())
+                    }
+                    .frame(height: 10)
+                }
+            }
+
+            Divider().background(Color.white.opacity(0.10))
+
+            if viewModel.isFairPlaySafetyLocked {
+                Text("[安全鎖定] 疑似計時對局，已隱藏建議走法")
+                    .font(.headline.bold())
+                    .foregroundColor(.red)
+            } else if viewModel.isWaitingForOpponentReply {
+                Text("[等待對手落子] 畫面穩定後將立即計算最佳反擊")
+                    .font(.headline.bold())
+                    .foregroundColor(.cyan)
+            } else if let primary, viewModel.engineService.autoHintEnabled {
+                let movingPiece = viewModel.boardState.piece(at: primary.bestMove.from)
+                let pieceFullName = movingPiece?.type.fullChineseName ?? "棋子"
+                let posHint = "\(primary.bestMove.from.relativePositionHint(for: viewModel.perspective)) -> \(primary.bestMove.to.relativePositionHint(for: viewModel.perspective))"
+                let reasonText = primary.tacticalReason.isEmpty
+                    ? viewModel.boardState.explainMoveTactics(primary.bestMove)
+                    : primary.tacticalReason
+                let replyStr = (viewModel.engineService.showOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("#1 \(pieceFullName)  \(primary.bestMove.coordinateDisplay)  [\(primary.bestMove.san)]")
+                        .font(.title3.bold())
+                        .foregroundColor(.white)
+
+                    HStack(spacing: 8) {
+                        Text("螢幕位置：\(posHint)")
+                            .font(.subheadline.bold().monospaced())
+                            .foregroundColor(.cyan)
+                        Spacer()
+                        Text("[預測敵應] \(replyStr)")
+                            .font(.caption.bold())
+                            .foregroundColor(Color(white: 0.85))
+                    }
+
+                    Text("戰術目的：\(reasonText)")
+                        .font(.subheadline.bold())
+                        .foregroundColor(Color(red: 0.62, green: 0.96, blue: 0.72))
+                }
+            } else {
+                Text("正在計算當前局面的最佳安全戰術...")
+                    .font(.subheadline.bold())
+                    .foregroundColor(Color(white: 0.80))
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(red: 0.11, green: 0.15, blue: 0.20))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(winTint.opacity(0.35), lineWidth: 1.5)
+        )
     }
 }

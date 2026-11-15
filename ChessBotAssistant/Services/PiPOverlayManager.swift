@@ -27,6 +27,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var startTime = CACurrentMediaTime()
 
     private var latestBoard: ChessBoardState = .startingPosition
+    private var latestLastMove: ChessMove?
     private var latestAnalysis: EngineAnalysisResult?
     private var latestPerspective: PieceColor = .white
     private var latestAutoHint: Bool = true
@@ -44,6 +45,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var latestPinnedCount: Int = 0
     private var latestIsWaitingForOpponentReply: Bool = false
     private var latestIsBoardDetected: Bool = false
+    private var latestBigScreenBoardMode: Bool = false
     private var latestIsAnalyzing: Bool = false
     private var latestPaceRemainingSeconds: Int = 0
     private var latestStealthSafetyScore: Int = 90
@@ -54,6 +56,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var contentRevision: UInt64 = 0
     private var renderedRevision: UInt64 = 0
     private var cachedPixelBuffer: CVPixelBuffer?
+    private var lastEnqueuedCanvasSize: CGSize = .zero
 
     override init() {
         super.init()
@@ -110,6 +113,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
 
     func updateContent(
         board: ChessBoardState,
+        lastMove: ChessMove? = nil,
         analysis: EngineAnalysisResult?,
         perspective: PieceColor,
         autoHintEnabled: Bool,
@@ -127,6 +131,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         pinnedCount: Int = 0,
         isWaitingForOpponentReply: Bool = false,
         isBoardDetected: Bool = false,
+        bigScreenBoardMode: Bool = false,
         isAnalyzing: Bool = false,
         paceRemainingSeconds: Int = 0,
         stealthSafetyScore: Int = 90,
@@ -136,6 +141,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         lastKnownEvalStr: String = "0.00"
     ) {
         self.latestBoard = board
+        self.latestLastMove = lastMove
         self.latestAnalysis = analysis
         self.latestPerspective = perspective
         self.latestAutoHint = autoHintEnabled
@@ -153,6 +159,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         self.latestPinnedCount = pinnedCount
         self.latestIsWaitingForOpponentReply = isWaitingForOpponentReply
         self.latestIsBoardDetected = isBoardDetected
+        self.latestBigScreenBoardMode = bigScreenBoardMode
         self.latestIsAnalyzing = isAnalyzing
         self.latestPaceRemainingSeconds = paceRemainingSeconds
         self.latestStealthSafetyScore = stealthSafetyScore
@@ -304,6 +311,15 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         guard let buffer = pixelBuffer,
               let sampleBuffer = makeSampleBuffer(from: buffer) else { return }
 
+        let currentSize = CGSize(
+            width: CVPixelBufferGetWidth(buffer),
+            height: CVPixelBufferGetHeight(buffer)
+        )
+        if lastEnqueuedCanvasSize != .zero && lastEnqueuedCanvasSize != currentSize {
+            displayLayer.sampleBufferRenderer.flush()
+        }
+        lastEnqueuedCanvasSize = currentSize
+
         if displayLayer.sampleBufferRenderer.status == .failed {
             displayLayer.sampleBufferRenderer.flush()
         }
@@ -411,10 +427,18 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         completionHandler()
     }
 
-    // MARK: - HUD Frame Renderer (720 x 440 Board-Free Tactical & Win-Rate HUD)
+    // MARK: - HUD Frame Renderer (Waiting / Dual-Split Board+HUD / Big-Screen Giant Board)
 
     private func renderPiPHUDImage() -> UIImage {
-        let canvasSize = CGSize(width: 720, height: 440)
+        let canvasSize: CGSize
+        if !latestIsBoardDetected {
+            canvasSize = CGSize(width: 760, height: 440)
+        } else if latestBigScreenBoardMode {
+            canvasSize = CGSize(width: 540, height: 620)
+        } else {
+            canvasSize = CGSize(width: 760, height: 440)
+        }
+
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1.0
         format.opaque = true
@@ -423,524 +447,995 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         return renderer.image { ctx in
             let cg = ctx.cgContext
 
-            // Background
             UIColor(red: 0.075, green: 0.095, blue: 0.125, alpha: 1.0).setFill()
             cg.fill(CGRect(origin: .zero, size: canvasSize))
 
             let netLabel = latestZeroNetworkMode ? "[離線引擎 10MB]" : "[雲端混合]"
             let syncLabel = latestAutoSyncActive ? "[實時監聽中]" : "[手動掃描]"
 
-            guard latestIsBoardDetected else {
-                // Waiting for Board Detection Full-Screen HUD
-                let waitRect = CGRect(x: 24, y: 20, width: 672, height: 400)
-                UIColor(red: 0.11, green: 0.145, blue: 0.195, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: waitRect, cornerRadius: 16).fill()
-                UIColor(red: 0.28, green: 0.72, blue: 0.92, alpha: 0.38).setStroke()
-                let border = UIBezierPath(roundedRect: waitRect, cornerRadius: 16)
-                border.lineWidth = 2.0
-                border.stroke()
-
-                let brandAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 15, weight: .heavy),
-                    .foregroundColor: UIColor(red: 0.50, green: 0.88, blue: 0.45, alpha: 1.0)
-                ]
-                NSString(string: "[CHESS BOT 輔助大師]").draw(
-                    at: CGPoint(x: 42, y: 38),
-                    withAttributes: brandAttr
-                )
-
-                let rightStyle = NSMutableParagraphStyle()
-                rightStyle.alignment = .right
-                let topRightAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
-                    .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0),
-                    .paragraphStyle: rightStyle
-                ]
-                NSString(string: "\(syncLabel) · \(netLabel) · 防封 \(latestStealthSafetyScore)%").draw(
-                    in: CGRect(x: 280, y: 38, width: 396, height: 22),
-                    withAttributes: topRightAttr
-                )
-
-                let centerStyle = NSMutableParagraphStyle()
-                centerStyle.alignment = .center
-
-                let titleAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 42, weight: .heavy),
-                    .foregroundColor: UIColor.white,
-                    .paragraphStyle: centerStyle
-                ]
-                NSString(string: "等待偵測棋盤").draw(
-                    in: CGRect(x: 40, y: 136, width: 640, height: 54),
-                    withAttributes: titleAttr
-                )
-
-                let subAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 18, weight: .bold),
-                    .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0),
-                    .paragraphStyle: centerStyle
-                ]
-                NSString(string: "請切換至 Chess.com 對局畫面（螢幕直播或截圖自動識別）").draw(
-                    in: CGRect(x: 44, y: 204, width: 632, height: 30),
-                    withAttributes: subAttr
-                )
-
-                let featAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 14.5, weight: .medium),
-                    .foregroundColor: UIColor(white: 0.72, alpha: 1.0),
-                    .paragraphStyle: centerStyle
-                ]
-                NSString(string: "偵測到棋盤後將直接顯示：我方勝率 · 勝/和/負比例 · 最佳走法座標 · 戰術解析").draw(
-                    in: CGRect(x: 44, y: 254, width: 632, height: 28),
-                    withAttributes: featAttr
-                )
-
-                let bottomStrip = CGRect(x: 40, y: 376, width: 640, height: 30)
-                if pipBannerText != nil {
-                    UIColor(red: 0.16, green: 0.34, blue: 0.22, alpha: 0.95).setFill()
-                    UIBezierPath(roundedRect: bottomStrip, cornerRadius: 8).fill()
-                }
-                let bottomAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
-                    .foregroundColor: pipBannerText != nil
-                        ? UIColor(red: 0.62, green: 0.98, blue: 0.68, alpha: 1.0)
-                        : UIColor(white: 0.76, alpha: 1.0),
-                    .paragraphStyle: centerStyle
-                ]
-                NSString(string: pipBannerText ?? "[播放鍵：立即讀取截圖]   [快轉鍵：換步/掃描]   [倒轉鍵：重置]").draw(
-                    in: CGRect(x: bottomStrip.minX + 6, y: bottomStrip.minY + 5, width: bottomStrip.width - 12, height: 22),
-                    withAttributes: bottomAttr
-                )
-                return
+            if !latestIsBoardDetected {
+                renderWaitingDetectionHUD(in: cg, size: canvasSize, netLabel: netLabel, syncLabel: syncLabel)
+            } else if latestBigScreenBoardMode {
+                renderBigScreenGiantBoardHUD(in: cg, size: canvasSize, netLabel: netLabel, syncLabel: syncLabel)
+            } else {
+                renderDualSplitBoardHUD(in: cg, size: canvasSize, netLabel: netLabel, syncLabel: syncLabel)
             }
+        }
+    }
 
-            // Tier 1: Full-Width Win-Rate & WDL Header (x: 24, y: 18, w: 672, h: 110)
-            let headerRect = CGRect(x: 24, y: 18, width: 672, height: 110)
-            UIColor(red: 0.115, green: 0.155, blue: 0.205, alpha: 1.0).setFill()
-            UIBezierPath(roundedRect: headerRect, cornerRadius: 14).fill()
-            UIColor(white: 1.0, alpha: 0.10).setStroke()
-            let headerBorder = UIBezierPath(roundedRect: headerRect, cornerRadius: 14)
-            headerBorder.lineWidth = 1.5
-            headerBorder.stroke()
+    private func renderWaitingDetectionHUD(in cg: CGContext, size: CGSize, netLabel: String, syncLabel: String) {
+        let waitRect = CGRect(x: 24, y: 20, width: size.width - 48, height: size.height - 40)
+        UIColor(red: 0.11, green: 0.145, blue: 0.195, alpha: 1.0).setFill()
+        UIBezierPath(roundedRect: waitRect, cornerRadius: 16).fill()
+        UIColor(red: 0.28, green: 0.72, blue: 0.92, alpha: 0.38).setStroke()
+        let border = UIBezierPath(roundedRect: waitRect, cornerRadius: 16)
+        border.lineWidth = 2.0
+        border.stroke()
 
-            let primary = latestAnalysis?.primaryLine
-            let winPct = primary.map { Int($0.winProbability(for: latestPerspective).rounded()) } ?? latestLastKnownWinPct
-            let wdl = primary?.wdlBreakdown(for: latestPerspective) ?? latestLastKnownWDL
-            let evalStr = primary?.formattedScore ?? latestLastKnownEvalStr
-            let campShort = latestPerspective == .white ? "執白" : "執黑"
-            let depthText = latestAnalysis.map { "D\($0.depthReached)" } ?? (latestIsAnalyzing ? "計算中" : "待機")
+        NSString(string: "[CHESS BOT 輔助大師]").draw(
+            at: CGPoint(x: 42, y: 38),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 15, weight: .heavy),
+                .foregroundColor: UIColor(red: 0.50, green: 0.88, blue: 0.45, alpha: 1.0)
+            ]
+        )
 
-            // Left block: Huge Win Rate %
-            let winTitleAttr: [NSAttributedString.Key: Any] = [
+        let rightStyle = NSMutableParagraphStyle()
+        rightStyle.alignment = .right
+        NSString(string: "\(syncLabel) · \(netLabel) · 防封 \(latestStealthSafetyScore)%").draw(
+            in: CGRect(x: 280, y: 38, width: size.width - 322, height: 22),
+            withAttributes: [
                 .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0),
+                .paragraphStyle: rightStyle
+            ]
+        )
+
+        let centerStyle = NSMutableParagraphStyle()
+        centerStyle.alignment = .center
+
+        NSString(string: "等待偵測棋盤").draw(
+            in: CGRect(x: 40, y: 136, width: size.width - 80, height: 54),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 42, weight: .heavy),
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: centerStyle
+            ]
+        )
+
+        NSString(string: "請切換至 Chess.com 對局畫面（螢幕直播或截圖自動識別）").draw(
+            in: CGRect(x: 44, y: 204, width: size.width - 88, height: 30),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 18, weight: .bold),
+                .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0),
+                .paragraphStyle: centerStyle
+            ]
+        )
+
+        NSString(string: "偵測到棋盤後立即顯示：8x8 戰術棋盤與箭頭 · 我方勝率 · 頂部大螢幕即時橫幅").draw(
+            in: CGRect(x: 44, y: 254, width: size.width - 88, height: 28),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 14.5, weight: .medium),
+                .foregroundColor: UIColor(white: 0.72, alpha: 1.0),
+                .paragraphStyle: centerStyle
+            ]
+        )
+
+        let bottomStrip = CGRect(x: 40, y: size.height - 64, width: size.width - 80, height: 30)
+        drawFooterStrip(rect: bottomStrip, defaultText: "[播放鍵：立即讀取截圖]   [快轉鍵：換步/掃描]   [倒轉鍵：重置]")
+    }
+
+    private func renderDualSplitBoardHUD(in cg: CGContext, size: CGSize, netLabel: String, syncLabel: String) {
+        // Left: 8x8 Tactical Chessboard with arrows (384 x 384)
+        let boardRect = CGRect(x: 18, y: 16, width: 384, height: 384)
+        drawDetectedChessBoard(in: boardRect, showCoordinateBadgesOnPrimary: false, in: cg)
+
+        let primary = latestAnalysis?.primaryLine
+        let winPct = primary.map { Int($0.winProbability(for: latestPerspective).rounded()) } ?? latestLastKnownWinPct
+        let wdl = primary?.wdlBreakdown(for: latestPerspective) ?? latestLastKnownWDL
+        let evalStr = primary?.formattedScore ?? latestLastKnownEvalStr
+        let campShort = latestPerspective == .white ? "執白" : "執黑"
+        let depthText = latestAnalysis.map { "D\($0.depthReached)" } ?? (latestIsAnalyzing ? "計算中" : "待機")
+
+        // Right Column (x: 416, width: 326)
+        let rightX: CGFloat = 416
+        let rightW: CGFloat = 326
+
+        // Card 1: Big Win-Rate + WDL Bar (y: 16, h: 118)
+        let winCard = CGRect(x: rightX, y: 16, width: rightW, height: 118)
+        drawCard(winCard, fill: UIColor(red: 0.115, green: 0.155, blue: 0.205, alpha: 1.0), border: UIColor(white: 1.0, alpha: 0.10))
+
+        NSString(string: "我方(\(campShort))勝率").draw(
+            at: CGPoint(x: rightX + 12, y: 24),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 12.5, weight: .bold),
                 .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0)
             ]
-            NSString(string: "我方(\(campShort))勝率").draw(at: CGPoint(x: 40, y: 27), withAttributes: winTitleAttr)
+        )
 
-            let winColor: UIColor = winPct >= 52
-                ? UIColor(red: 0.35, green: 0.92, blue: 0.48, alpha: 1.0)
-                : (winPct >= 44 ? UIColor(red: 0.98, green: 0.82, blue: 0.32, alpha: 1.0) : UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0))
-            let hugeWinAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 44, weight: .heavy),
+        let status = resolveCurrentStatusTuple()
+        let pillRect = CGRect(x: rightX + rightW - 118, y: 22, width: 106, height: 22)
+        drawStatusPill(rect: pillRect, text: status.title, color: status.color)
+
+        let winColor = winRateColor(winPct)
+        NSString(string: "\(winPct)%").draw(
+            at: CGPoint(x: rightX + 12, y: 42),
+            withAttributes: [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 34, weight: .heavy),
                 .foregroundColor: winColor
             ]
-            NSString(string: "\(winPct)%").draw(at: CGPoint(x: 40, y: 50), withAttributes: hugeWinAttr)
+        )
 
-            // Middle block: Eval + WDL % + 3-Color WDL Bar + Opening/Depth
-            let evalTitleAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .heavy),
+        NSString(string: "評估 \(evalStr)").draw(
+            at: CGPoint(x: rightX + 126, y: 49),
+            withAttributes: [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 17, weight: .heavy),
                 .foregroundColor: UIColor.white
             ]
-            NSString(string: "評估 \(evalStr)").draw(at: CGPoint(x: 218, y: 26), withAttributes: evalTitleAttr)
+        )
 
-            let depthBadgeAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .bold),
-                .foregroundColor: UIColor(red: 0.50, green: 0.88, blue: 0.48, alpha: 1.0)
+        let rightAlign = NSMutableParagraphStyle()
+        rightAlign.alignment = .right
+        NSString(string: depthText).draw(
+            in: CGRect(x: rightX + 230, y: 52, width: 84, height: 18),
+            withAttributes: [
+                .font: UIFont.monospacedSystemFont(ofSize: 12.5, weight: .bold),
+                .foregroundColor: UIColor(red: 0.50, green: 0.88, blue: 0.48, alpha: 1.0),
+                .paragraphStyle: rightAlign
             ]
-            NSString(string: depthText).draw(at: CGPoint(x: 454, y: 31), withAttributes: depthBadgeAttr)
+        )
 
-            let wdlTextAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .bold),
-                .foregroundColor: UIColor(white: 0.92, alpha: 1.0)
+        NSString(string: "勝 \(wdl.win)%   和 \(wdl.draw)%   負 \(wdl.loss)%").draw(
+            at: CGPoint(x: rightX + 12, y: 86),
+            withAttributes: [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .bold),
+                .foregroundColor: UIColor(white: 0.90, alpha: 1.0)
             ]
-            NSString(string: "勝 \(wdl.win)%   和 \(wdl.draw)%   負 \(wdl.loss)%").draw(at: CGPoint(x: 218, y: 57), withAttributes: wdlTextAttr)
+        )
 
-            // 3-color WDL bar
-            let barTotalW: CGFloat = 290
-            let barX: CGFloat = 218
-            let barY: CGFloat = 80
-            let barH: CGFloat = 12
-            let winW = barTotalW * CGFloat(wdl.win) / 100.0
-            let drawW = barTotalW * CGFloat(wdl.draw) / 100.0
-            let lossW = max(0, barTotalW - winW - drawW)
-            cg.saveGState()
-            UIBezierPath(roundedRect: CGRect(x: barX, y: barY, width: barTotalW, height: barH), cornerRadius: 6).addClip()
-            UIColor(red: 0.30, green: 0.86, blue: 0.44, alpha: 1.0).setFill()
-            cg.fill(CGRect(x: barX, y: barY, width: winW, height: barH))
-            UIColor(white: 0.48, alpha: 1.0).setFill()
-            cg.fill(CGRect(x: barX + winW, y: barY, width: drawW, height: barH))
-            UIColor(red: 0.92, green: 0.34, blue: 0.38, alpha: 1.0).setFill()
-            cg.fill(CGRect(x: barX + winW + drawW, y: barY, width: lossW, height: barH))
-            cg.restoreGState()
+        drawWDLBar(
+            rect: CGRect(x: rightX + 12, y: 106, width: rightW - 24, height: 10),
+            wdl: wdl,
+            in: cg
+        )
 
-            let openText = latestOpeningName.isEmpty ? "即時戰術分析中" : latestOpeningName
-            let openAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 12.5, weight: .semibold),
-                .foregroundColor: UIColor(white: 0.72, alpha: 1.0)
-            ]
-            NSString(string: openText).draw(in: CGRect(x: 218, y: 98, width: 294, height: 18), withAttributes: openAttr)
+        // Card 2: Primary Move Command Card (y: 142, h: 144)
+        let cmdCard = CGRect(x: rightX, y: 142, width: rightW, height: 144)
+        drawPrimaryCommandCard(
+            in: cmdCard,
+            primary: primary,
+            winPct: winPct,
+            compactForSplitLayout: true
+        )
 
-            // Right Status Box (x: 526, y: 28, w: 156, h: 90)
-            let statusBox = CGRect(x: 526, y: 28, width: 156, height: 90)
-            let statusTitle: String
-            let statusSub: String
-            let statusColor: UIColor
-            if latestIsSafetyLocked {
-                statusTitle = "[安全鎖定]"
-                statusSub = "疑似計時對局"
-                statusColor = UIColor(red: 1.0, green: 0.42, blue: 0.42, alpha: 1.0)
-            } else if latestIsKingInCheck {
-                statusTitle = "[國王被將軍]"
-                statusSub = "必須優先解將"
-                statusColor = UIColor(red: 1.0, green: 0.42, blue: 0.42, alpha: 1.0)
-            } else if latestPinnedCount > 0 {
-                statusTitle = "[護王牽制×\(latestPinnedCount)]"
-                statusSub = "勿動被牽制子"
-                statusColor = UIColor(red: 1.0, green: 0.68, blue: 0.25, alpha: 1.0)
-            } else if latestIsWaitingForOpponentReply {
-                statusTitle = "[等待對手]"
-                statusSub = "回子後自動算"
-                statusColor = UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0)
-            } else if latestPaceRemainingSeconds > 0 {
-                statusTitle = "[防封節奏]"
-                statusSub = "建議停頓 \(latestPaceRemainingSeconds)s"
-                statusColor = UIColor(red: 0.98, green: 0.82, blue: 0.34, alpha: 1.0)
+        // Card 3 & 4: Candidate #2 and #3 Rows (y: 294 & y: 350, h: 50)
+        let secondaryColors: [UIColor] = [
+            UIColor(red: 0.22, green: 0.78, blue: 0.96, alpha: 1.0),
+            UIColor(red: 0.98, green: 0.72, blue: 0.22, alpha: 1.0)
+        ]
+        let candidates = Array((latestAnalysis?.lines ?? []).dropFirst().prefix(2))
+        for idx in 0..<2 {
+            let rowY: CGFloat = idx == 0 ? 294 : 350
+            let rowRect = CGRect(x: rightX, y: rowY, width: rightW, height: 50)
+            drawCard(rowRect, fill: UIColor(red: 0.12, green: 0.15, blue: 0.20, alpha: 1.0), border: UIColor(white: 1.0, alpha: 0.08))
+
+            if !latestIsSafetyLocked && !latestIsWaitingForOpponentReply && !latestCoachPieceOnlyMode && latestAutoHint,
+               idx < candidates.count {
+                let line = candidates[idx]
+                let accent = secondaryColors[idx]
+                accent.setFill()
+                UIBezierPath(roundedRect: CGRect(x: rightX, y: rowY, width: 5, height: 50), cornerRadius: 2.5).fill()
+
+                let pName = latestBoard.piece(at: line.bestMove.from)?.type.displayName ?? "子"
+                let lineWin = Int(line.winProbability(for: latestPerspective).rounded())
+
+                let leftPara = NSMutableParagraphStyle()
+                leftPara.lineBreakMode = .byTruncatingTail
+                NSString(string: "#\(idx + 2) \(pName) \(line.bestMove.san) \(line.bestMove.coordinateDisplay)").draw(
+                    in: CGRect(x: rightX + 12, y: rowY + 6, width: 196, height: 18),
+                    withAttributes: [
+                        .font: UIFont.systemFont(ofSize: 13.5, weight: .heavy),
+                        .foregroundColor: UIColor.white,
+                        .paragraphStyle: leftPara
+                    ]
+                )
+
+                NSString(string: "\(line.formattedScore) · \(lineWin)%").draw(
+                    in: CGRect(x: rightX + 206, y: rowY + 7, width: 108, height: 18),
+                    withAttributes: [
+                        .font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
+                        .foregroundColor: accent,
+                        .paragraphStyle: rightAlign
+                    ]
+                )
+
+                let subText = line.tacticalReason.isEmpty ? line.continuationPreview : line.tacticalReason
+                NSString(string: subText).draw(
+                    in: CGRect(x: rightX + 12, y: rowY + 27, width: rightW - 22, height: 16),
+                    withAttributes: [
+                        .font: UIFont.systemFont(ofSize: 11.5, weight: .medium),
+                        .foregroundColor: UIColor(white: 0.72, alpha: 1.0),
+                        .paragraphStyle: leftPara
+                    ]
+                )
             } else {
-                statusTitle = "[輪到我方]"
-                statusSub = "安全節奏就緒"
-                statusColor = UIColor(red: 0.42, green: 0.92, blue: 0.54, alpha: 1.0)
+                let placeholderText = latestIsWaitingForOpponentReply
+                    ? "等待對手回棋後自動更新備選線 #\(idx + 2)"
+                    : "備選線 #\(idx + 2) 待分析"
+                NSString(string: placeholderText).draw(
+                    in: CGRect(x: rightX + 12, y: rowY + 16, width: rightW - 24, height: 18),
+                    withAttributes: [
+                        .font: UIFont.systemFont(ofSize: 12, weight: .medium),
+                        .foregroundColor: UIColor(white: 0.50, alpha: 1.0)
+                    ]
+                )
             }
+        }
 
-            statusColor.withAlphaComponent(0.15).setFill()
-            UIBezierPath(roundedRect: statusBox, cornerRadius: 11).fill()
-            statusColor.withAlphaComponent(0.55).setStroke()
-            let statusBorder = UIBezierPath(roundedRect: statusBox, cornerRadius: 11)
-            statusBorder.lineWidth = 1.5
-            statusBorder.stroke()
+        // Bottom Footer
+        let openShort = latestOpeningName.isEmpty ? "實戰同步" : latestOpeningName
+        let defaultFooter = "[防封 \(latestStealthSafetyScore)%] · \(netLabel) · \(syncLabel) · \(openShort) · [播:掃描 | 快轉:換步]"
+        drawFooterStrip(rect: CGRect(x: 18, y: 408, width: 724, height: 24), defaultText: defaultFooter)
+    }
 
-            let stCenter = NSMutableParagraphStyle()
-            stCenter.alignment = .center
-            NSString(string: statusTitle).draw(
-                in: CGRect(x: statusBox.minX + 6, y: statusBox.minY + 18, width: statusBox.width - 12, height: 24),
+    private func renderBigScreenGiantBoardHUD(in cg: CGContext, size: CGSize, netLabel: String, syncLabel: String) {
+        let primary = latestAnalysis?.primaryLine
+        let winPct = primary.map { Int($0.winProbability(for: latestPerspective).rounded()) } ?? latestLastKnownWinPct
+        let wdl = primary?.wdlBreakdown(for: latestPerspective) ?? latestLastKnownWDL
+        let evalStr = primary?.formattedScore ?? latestLastKnownEvalStr
+        let campShort = latestPerspective == .white ? "執白" : "執黑"
+
+        // Top Giant HUD Banner (x: 16, y: 12, w: 508, h: 98)
+        let headerRect = CGRect(x: 16, y: 12, width: size.width - 32, height: 98)
+        drawCard(headerRect, fill: UIColor(red: 0.115, green: 0.155, blue: 0.205, alpha: 1.0), border: UIColor(red: 0.30, green: 0.86, blue: 0.48, alpha: 0.45))
+
+        NSString(string: "我方(\(campShort))勝率").draw(
+            at: CGPoint(x: 28, y: 20),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 11.5, weight: .bold),
+                .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0)
+            ]
+        )
+
+        NSString(string: "\(winPct)%").draw(
+            at: CGPoint(x: 28, y: 35),
+            withAttributes: [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 32, weight: .heavy),
+                .foregroundColor: winRateColor(winPct)
+            ]
+        )
+
+        NSString(string: "評估 \(evalStr)").draw(
+            at: CGPoint(x: 28, y: 74),
+            withAttributes: [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
+                .foregroundColor: UIColor(white: 0.85, alpha: 1.0)
+            ]
+        )
+
+        drawWDLBar(rect: CGRect(x: 28, y: 92, width: 138, height: 8), wdl: wdl, in: cg)
+
+        // Divider line
+        UIColor(white: 1.0, alpha: 0.12).setFill()
+        cg.fill(CGRect(x: 178, y: 20, width: 1, height: 82))
+
+        // Right portion of Top Banner: #1 Move + Pos Hint + Reason
+        let infoX: CGFloat = 190
+        let infoW: CGFloat = headerRect.maxX - infoX - 12
+        let truncPara = NSMutableParagraphStyle()
+        truncPara.lineBreakMode = .byTruncatingTail
+
+        if latestIsSafetyLocked {
+            NSString(string: "[安全鎖定] 疑似計時對局").draw(
+                in: CGRect(x: infoX, y: 24, width: infoW, height: 26),
                 withAttributes: [
-                    .font: UIFont.systemFont(ofSize: 15, weight: .heavy),
-                    .foregroundColor: statusColor,
-                    .paragraphStyle: stCenter
+                    .font: UIFont.systemFont(ofSize: 18, weight: .heavy),
+                    .foregroundColor: UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0),
+                    .paragraphStyle: truncPara
                 ]
             )
-            NSString(string: statusSub).draw(
-                in: CGRect(x: statusBox.minX + 6, y: statusBox.minY + 50, width: statusBox.width - 12, height: 22),
+            NSString(string: "請切回主程式解除 Bot 安全鎖定").draw(
+                in: CGRect(x: infoX, y: 56, width: infoW, height: 22),
                 withAttributes: [
-                    .font: UIFont.systemFont(ofSize: 13, weight: .bold),
+                    .font: UIFont.systemFont(ofSize: 13, weight: .semibold),
+                    .foregroundColor: UIColor.white
+                ]
+            )
+        } else if latestIsWaitingForOpponentReply {
+            NSString(string: "[等待對手落子] 穩定防跳幀鎖定中").draw(
+                in: CGRect(x: infoX, y: 26, width: infoW, height: 26),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 17, weight: .heavy),
+                    .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+            NSString(string: "勝 \(wdl.win)% / 和 \(wdl.draw)% / 負 \(wdl.loss)% · 回子後立即更新箭頭").draw(
+                in: CGRect(x: infoX, y: 58, width: infoW, height: 22),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 12.5, weight: .medium),
+                    .foregroundColor: UIColor(white: 0.84, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+        } else if let primary, latestAutoHint {
+            let movingPiece = latestBoard.piece(at: primary.bestMove.from)
+            let pieceFullName = movingPiece?.type.fullChineseName ?? "棋子"
+            let posHint = "\(primary.bestMove.from.relativePositionHint(for: latestPerspective)) -> \(primary.bestMove.to.relativePositionHint(for: latestPerspective))"
+            let reasonText = primary.tacticalReason.isEmpty
+                ? latestBoard.explainMoveTactics(primary.bestMove)
+                : primary.tacticalReason
+            let replyStr = (latestShowOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
+
+            let headline = latestCoachPieceOnlyMode
+                ? "動：\(pieceFullName) (\(primary.bestMove.from.algebraic))"
+                : "#1 \(pieceFullName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]"
+            NSString(string: headline).draw(
+                in: CGRect(x: infoX, y: 19, width: infoW, height: 26),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 19, weight: .heavy),
                     .foregroundColor: UIColor.white,
-                    .paragraphStyle: stCenter
+                    .paragraphStyle: truncPara
                 ]
             )
 
-            // Tier 2: Full-Width Primary Move Command Card (x: 24, y: 138, w: 672, h: 152)
-            let mainCard = CGRect(x: 24, y: 138, width: 672, height: 152)
-            if latestIsSafetyLocked {
-                UIColor(red: 0.28, green: 0.10, blue: 0.11, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: mainCard, cornerRadius: 14).fill()
-                UIColor(red: 0.95, green: 0.35, blue: 0.35, alpha: 0.85).setStroke()
-                let b = UIBezierPath(roundedRect: mainCard, cornerRadius: 14)
-                b.lineWidth = 2.0
-                b.stroke()
-
-                NSString(string: "[安全鎖定] 疑似計時對局 · 已自動隱藏提示防止誤封").draw(
-                    in: CGRect(x: 42, y: 156, width: 636, height: 32),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 20, weight: .heavy),
-                        .foregroundColor: UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
-                    ]
-                )
-                NSString(string: "偵測到倒數計時器且無 Bot 標記。\n若確定為電腦練習賽，請切回主程式點擊「確認為 Bot 對局並解鎖」。").draw(
-                    in: CGRect(x: 42, y: 198, width: 636, height: 76),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 15.5, weight: .semibold),
-                        .foregroundColor: UIColor.white
-                    ]
-                )
-            } else if latestIsWaitingForOpponentReply {
-                UIColor(red: 0.11, green: 0.16, blue: 0.22, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: mainCard, cornerRadius: 14).fill()
-                UIColor(red: 0.28, green: 0.72, blue: 0.92, alpha: 0.60).setStroke()
-                let b = UIBezierPath(roundedRect: mainCard, cornerRadius: 14)
-                b.lineWidth = 1.8
-                b.stroke()
-
-                NSString(string: "[已偵測我方走子 · 等待對手落子中]").draw(
-                    in: CGRect(x: 42, y: 158, width: 636, height: 32),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 22, weight: .heavy),
-                        .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0)
-                    ]
-                )
-                NSString(string: "畫面穩定鎖定中，避免因對手思考或動畫過渡產生跳幀誤判。\n上方已持續顯示目前我方勝率（\(winPct)%）與局面優勢評估，對手落子穩定後將立即算出最佳反擊。").draw(
-                    in: CGRect(x: 42, y: 200, width: 636, height: 76),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 15, weight: .medium),
-                        .foregroundColor: UIColor(white: 0.88, alpha: 1.0)
-                    ]
-                )
-            } else if latestIsAnalyzing && primary == nil {
-                UIColor(red: 0.12, green: 0.15, blue: 0.20, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: mainCard, cornerRadius: 14).fill()
-                UIColor(red: 0.35, green: 0.88, blue: 0.48, alpha: 0.45).setStroke()
-                let b = UIBezierPath(roundedRect: mainCard, cornerRadius: 14)
-                b.lineWidth = 1.5
-                b.stroke()
-
-                NSString(string: "[穩定計算中] 正在分析最佳安全著法...").draw(
-                    in: CGRect(x: 42, y: 162, width: 636, height: 34),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 23, weight: .heavy),
-                        .foregroundColor: UIColor(red: 0.45, green: 0.92, blue: 0.55, alpha: 1.0)
-                    ]
-                )
-                NSString(string: "採用單次定案策略，避免本地與雲端結果切換造成跳幀；\n計算完成後將直接顯示棋子名稱、螢幕位置座標與戰術原因。").draw(
-                    in: CGRect(x: 42, y: 206, width: 636, height: 68),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 15, weight: .medium),
-                        .foregroundColor: UIColor(white: 0.84, alpha: 1.0)
-                    ]
-                )
-            } else if !latestAutoHint {
-                UIColor(red: 0.12, green: 0.15, blue: 0.19, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: mainCard, cornerRadius: 14).fill()
-                NSString(string: "自動建議提示已暫停（僅顯示勝率與局勢評估）").draw(
-                    in: CGRect(x: 42, y: 196, width: 636, height: 34),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 19, weight: .bold),
-                        .foregroundColor: UIColor(white: 0.80, alpha: 1.0)
-                    ]
-                )
-            } else if let primary {
-                UIColor(red: 0.115, green: 0.175, blue: 0.155, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: mainCard, cornerRadius: 14).fill()
-                UIColor(red: 0.30, green: 0.88, blue: 0.48, alpha: 0.65).setStroke()
-                let b = UIBezierPath(roundedRect: mainCard, cornerRadius: 14)
-                b.lineWidth = 2.0
-                b.stroke()
-
-                UIColor(red: 0.30, green: 0.88, blue: 0.48, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: CGRect(x: 24, y: 138, width: 8, height: 152), cornerRadius: 4).fill()
-
-                let movingPiece = latestBoard.piece(at: primary.bestMove.from)
-                let pieceFullName = movingPiece?.type.fullChineseName ?? "棋子"
-                let posHint = "\(primary.bestMove.from.relativePositionHint(for: latestPerspective)) -> \(primary.bestMove.to.relativePositionHint(for: latestPerspective))"
-                let reasonText = primary.tacticalReason.isEmpty
-                    ? latestBoard.explainMoveTactics(primary.bestMove)
-                    : primary.tacticalReason
-
-                // Location badge on right
-                let locRect = CGRect(x: 500, y: 150, width: 178, height: 36)
-                UIColor(red: 0.14, green: 0.24, blue: 0.30, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: locRect, cornerRadius: 9).fill()
-                UIColor(red: 0.32, green: 0.82, blue: 0.98, alpha: 0.50).setStroke()
-                UIBezierPath(roundedRect: locRect, cornerRadius: 9).stroke()
-
-                let locStyle = NSMutableParagraphStyle()
-                locStyle.alignment = .center
-                let locText = latestCoachPieceOnlyMode
-                    ? primary.bestMove.from.relativePositionHint(for: latestPerspective)
-                    : posHint
-                NSString(string: locText).draw(
-                    in: CGRect(x: locRect.minX + 6, y: locRect.minY + 8, width: locRect.width - 12, height: 24),
-                    withAttributes: [
-                        .font: UIFont.monospacedSystemFont(ofSize: 15, weight: .heavy),
-                        .foregroundColor: UIColor(red: 0.42, green: 0.88, blue: 1.0, alpha: 1.0),
-                        .paragraphStyle: locStyle
-                    ]
-                )
-
-                if latestCoachPieceOnlyMode {
-                    NSString(string: "建議動：\(pieceFullName) (\(primary.bestMove.from.algebraic))").draw(
-                        in: CGRect(x: 44, y: 150, width: 444, height: 38),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 28, weight: .heavy),
-                            .foregroundColor: UIColor.white
-                        ]
-                    )
-                    NSString(string: "教練半提示模式：僅提示起點位置與戰術方向").draw(
-                        in: CGRect(x: 44, y: 202, width: 632, height: 24),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 16.5, weight: .bold),
-                            .foregroundColor: UIColor(red: 0.62, green: 0.96, blue: 0.72, alpha: 1.0)
-                        ]
-                    )
-                } else {
-                    let movePara = NSMutableParagraphStyle()
-                    movePara.lineBreakMode = .byTruncatingTail
-                    NSString(string: "#1 \(pieceFullName)  \(primary.bestMove.coordinateDisplay)  [\(primary.bestMove.san)]").draw(
-                        in: CGRect(x: 44, y: 150, width: 444, height: 38),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 26, weight: .heavy),
-                            .foregroundColor: UIColor.white,
-                            .paragraphStyle: movePara
-                        ]
-                    )
-
-                    let reasonPara = NSMutableParagraphStyle()
-                    reasonPara.lineBreakMode = .byTruncatingTail
-                    NSString(string: "戰術目的：\(reasonText)").draw(
-                        in: CGRect(x: 44, y: 196, width: 634, height: 24),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 16.5, weight: .bold),
-                            .foregroundColor: UIColor(red: 0.64, green: 0.98, blue: 0.72, alpha: 1.0),
-                            .paragraphStyle: reasonPara
-                        ]
-                    )
-
-                    let replyStr = (latestShowOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
-                    let contStr = primary.continuationPreview.isEmpty ? "-" : primary.continuationPreview
-                    let replyPara = NSMutableParagraphStyle()
-                    replyPara.lineBreakMode = .byTruncatingTail
-                    NSString(string: "[預測敵應] \(replyStr)   |   續著：\(contStr)").draw(
-                        in: CGRect(x: 44, y: 226, width: 634, height: 22),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 14.5, weight: .semibold),
-                            .foregroundColor: UIColor(white: 0.88, alpha: 1.0),
-                            .paragraphStyle: replyPara
-                        ]
-                    )
-                }
-
-                let bottomWarn: String
-                let bottomWarnColor: UIColor
-                if latestIsKingInCheck {
-                    bottomWarn = "警示：國王被將軍中！若該子受王受阻，請按「快轉鍵」一鍵換步"
-                    bottomWarnColor = UIColor(red: 1.0, green: 0.52, blue: 0.52, alpha: 1.0)
-                } else if !latestPinnedSummary.isEmpty {
-                    bottomWarn = "護王牽制：\(latestPinnedSummary)（勿隨意移動；受阻按快轉換步）"
-                    bottomWarnColor = UIColor(red: 1.0, green: 0.76, blue: 0.36, alpha: 1.0)
-                } else if latestHangingCount > 0 {
-                    bottomWarn = "提示：目前有 \(latestHangingCount) 枚友子處於威脅格，請注意防守"
-                    bottomWarnColor = UIColor(red: 1.0, green: 0.68, blue: 0.40, alpha: 1.0)
-                } else {
-                    bottomWarn = "防封建議思考 \(latestThinkRange.isEmpty ? "2-4秒" : latestThinkRange) · 來源：\(latestAnalysis?.engineSource ?? "GM庫")"
-                    bottomWarnColor = UIColor(white: 0.72, alpha: 1.0)
-                }
-                let warnPara = NSMutableParagraphStyle()
-                warnPara.lineBreakMode = .byTruncatingTail
-                NSString(string: bottomWarn).draw(
-                    in: CGRect(x: 44, y: 256, width: 634, height: 20),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
-                        .foregroundColor: bottomWarnColor,
-                        .paragraphStyle: warnPara
-                    ]
-                )
-            } else {
-                UIColor(red: 0.12, green: 0.15, blue: 0.19, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: mainCard, cornerRadius: 14).fill()
-                NSString(string: "目前無合法著法（對局可能已結束）").draw(
-                    in: CGRect(x: 42, y: 196, width: 636, height: 34),
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: 20, weight: .bold),
-                        .foregroundColor: UIColor(white: 0.80, alpha: 1.0)
-                    ]
-                )
-            }
-
-            // Tier 3: Side-by-Side Candidate Moves #2 & #3 (x: 24 & 366, y: 300, w: 330, h: 78)
-            let secondaryColors: [UIColor] = [
-                UIColor(red: 0.22, green: 0.78, blue: 0.96, alpha: 1.0),
-                UIColor(red: 0.98, green: 0.72, blue: 0.22, alpha: 1.0)
-            ]
-            let candidates = Array((latestAnalysis?.lines ?? []).dropFirst().prefix(2))
-            for idx in 0..<2 {
-                let cardX: CGFloat = idx == 0 ? 24 : 366
-                let cardRect = CGRect(x: cardX, y: 300, width: 330, height: 78)
-                UIColor(red: 0.12, green: 0.15, blue: 0.20, alpha: 1.0).setFill()
-                UIBezierPath(roundedRect: cardRect, cornerRadius: 12).fill()
-
-                if !latestIsSafetyLocked && !latestIsWaitingForOpponentReply && !latestCoachPieceOnlyMode && latestAutoHint,
-                   idx < candidates.count {
-                    let line = candidates[idx]
-                    let accent = secondaryColors[idx]
-                    accent.setFill()
-                    UIBezierPath(roundedRect: CGRect(x: cardX, y: 300, width: 6, height: 78), cornerRadius: 3).fill()
-
-                    let pName = latestBoard.piece(at: line.bestMove.from)?.type.displayName ?? "子"
-                    let lineWin = Int(line.winProbability(for: latestPerspective).rounded())
-
-                    let topPara = NSMutableParagraphStyle()
-                    topPara.lineBreakMode = .byTruncatingTail
-                    NSString(string: "#\(idx + 2) \(pName) \(line.bestMove.san)  \(line.bestMove.coordinateDisplay)").draw(
-                        in: CGRect(x: cardX + 14, y: 309, width: 200, height: 22),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 15, weight: .heavy),
-                            .foregroundColor: UIColor.white,
-                            .paragraphStyle: topPara
-                        ]
-                    )
-
-                    let rightSt = NSMutableParagraphStyle()
-                    rightSt.alignment = .right
-                    NSString(string: "\(line.formattedScore) · 勝\(lineWin)%").draw(
-                        in: CGRect(x: cardX + 206, y: 310, width: 112, height: 20),
-                        withAttributes: [
-                            .font: UIFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .bold),
-                            .foregroundColor: accent,
-                            .paragraphStyle: rightSt
-                        ]
-                    )
-
-                    let subText = line.tacticalReason.isEmpty ? line.continuationPreview : line.tacticalReason
-                    let subPara = NSMutableParagraphStyle()
-                    subPara.lineBreakMode = .byTruncatingTail
-                    NSString(string: subText).draw(
-                        in: CGRect(x: cardX + 14, y: 342, width: 304, height: 20),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 12.5, weight: .medium),
-                            .foregroundColor: UIColor(white: 0.72, alpha: 1.0),
-                            .paragraphStyle: subPara
-                        ]
-                    )
-                } else {
-                    let placeholderText = latestIsWaitingForOpponentReply
-                        ? "等待對手回棋後自動補充備選線 #\(idx + 2)"
-                        : "備選線 #\(idx + 2) 待分析"
-                    NSString(string: placeholderText).draw(
-                        in: CGRect(x: cardX + 16, y: 328, width: 298, height: 20),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 13, weight: .medium),
-                            .foregroundColor: UIColor(white: 0.50, alpha: 1.0)
-                        ]
-                    )
-                }
-            }
-
-            // Bottom Footer Strip (y: 388, w: 672, h: 28)
-            let footerRect = CGRect(x: 24, y: 388, width: 672, height: 28)
-            if pipBannerText != nil {
-                UIColor(red: 0.16, green: 0.34, blue: 0.22, alpha: 0.95).setFill()
-                UIBezierPath(roundedRect: footerRect, cornerRadius: 7).fill()
-            }
-            let openShort = latestOpeningName.isEmpty ? "對局中" : latestOpeningName
-            let defaultFooter = "[防封 \(latestStealthSafetyScore)%] · \(netLabel) · \(syncLabel) · \(openShort) · [播:掃描 | 快轉:換步]"
-            let footerPara = NSMutableParagraphStyle()
-            footerPara.lineBreakMode = .byTruncatingTail
-            NSString(string: pipBannerText ?? defaultFooter).draw(
-                in: CGRect(x: footerRect.minX + 8, y: footerRect.minY + 5, width: footerRect.width - 16, height: 20),
+            NSString(string: "螢幕位置：\(latestCoachPieceOnlyMode ? primary.bestMove.from.relativePositionHint(for: latestPerspective) : posHint)").draw(
+                in: CGRect(x: infoX, y: 47, width: infoW, height: 20),
                 withAttributes: [
-                    .font: UIFont.systemFont(ofSize: 13, weight: .bold),
-                    .foregroundColor: pipBannerText != nil
-                        ? UIColor(red: 0.62, green: 0.98, blue: 0.68, alpha: 1.0)
-                        : UIColor(white: 0.74, alpha: 1.0),
-                    .paragraphStyle: footerPara
+                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                    .foregroundColor: UIColor(red: 0.42, green: 0.88, blue: 1.0, alpha: 1.0),
+                    .paragraphStyle: truncPara
                 ]
             )
+
+            NSString(string: "目的：\(reasonText)｜敵應：\(replyStr)").draw(
+                in: CGRect(x: infoX, y: 70, width: infoW, height: 20),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 12.5, weight: .bold),
+                    .foregroundColor: UIColor(red: 0.64, green: 0.98, blue: 0.72, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+        } else {
+            NSString(string: latestIsAnalyzing ? "[穩定計算中] 正在分析最佳著法..." : "[大螢幕巨型棋盤] 待機同步中").draw(
+                in: CGRect(x: infoX, y: 38, width: infoW, height: 26),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 16, weight: .heavy),
+                    .foregroundColor: UIColor(red: 0.45, green: 0.92, blue: 0.55, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+        }
+
+        // Giant 8x8 Tactical Chessboard (464 x 464)
+        let boardSide: CGFloat = 464
+        let boardRect = CGRect(x: (size.width - boardSide) / 2.0, y: 118, width: boardSide, height: boardSide)
+        drawDetectedChessBoard(in: boardRect, showCoordinateBadgesOnPrimary: true, in: cg)
+
+        // Bottom Footer
+        let openShort = latestOpeningName.isEmpty ? "實戰同步" : latestOpeningName
+        let defaultFooter = "[大螢幕巨型盤] · \(syncLabel) · \(netLabel) · \(openShort) · [播:掃描 | 快轉:換步]"
+        drawFooterStrip(rect: CGRect(x: 16, y: 589, width: size.width - 32, height: 22), defaultText: defaultFooter)
+    }
+
+    private func drawPrimaryCommandCard(
+        in rect: CGRect,
+        primary: PVLine?,
+        winPct: Int,
+        compactForSplitLayout: Bool
+    ) {
+        if latestIsSafetyLocked {
+            drawCard(rect, fill: UIColor(red: 0.28, green: 0.10, blue: 0.11, alpha: 1.0), border: UIColor(red: 0.95, green: 0.35, blue: 0.35, alpha: 0.85))
+            NSString(string: "[安全鎖定] 疑似計時對局").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 14, width: rect.width - 24, height: 24),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 16, weight: .heavy),
+                    .foregroundColor: UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
+                ]
+            )
+            NSString(string: "已自動隱藏提示防止誤封。\n若確定為 Bot 練習賽，請回主程式點擊解鎖。").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 46, width: rect.width - 24, height: 68),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 13, weight: .semibold),
+                    .foregroundColor: UIColor.white
+                ]
+            )
+            return
+        }
+
+        if latestIsWaitingForOpponentReply {
+            drawCard(rect, fill: UIColor(red: 0.11, green: 0.16, blue: 0.22, alpha: 1.0), border: UIColor(red: 0.28, green: 0.72, blue: 0.92, alpha: 0.60))
+            NSString(string: "[等待對手落子 · 防跳幀鎖定中]").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 14, width: rect.width - 24, height: 24),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 16, weight: .heavy),
+                    .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0)
+                ]
+            )
+            NSString(string: "目前我方勝率 \(winPct)%。\n待對手落子畫面穩定兩幀後，將立即更新箭頭與推薦步。").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 46, width: rect.width - 24, height: 68),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 13, weight: .medium),
+                    .foregroundColor: UIColor(white: 0.88, alpha: 1.0)
+                ]
+            )
+            return
+        }
+
+        if latestIsAnalyzing && primary == nil {
+            drawCard(rect, fill: UIColor(red: 0.12, green: 0.15, blue: 0.20, alpha: 1.0), border: UIColor(red: 0.35, green: 0.88, blue: 0.48, alpha: 0.45))
+            NSString(string: "[穩定計算中] 正在分析最佳步...").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 18, width: rect.width - 24, height: 24),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 16.5, weight: .heavy),
+                    .foregroundColor: UIColor(red: 0.45, green: 0.92, blue: 0.55, alpha: 1.0)
+                ]
+            )
+            NSString(string: "採用單次定案策略，避免多源切換跳幀；完成後將立即繪製箭頭與螢幕位置。").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 50, width: rect.width - 24, height: 64),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 13, weight: .medium),
+                    .foregroundColor: UIColor(white: 0.84, alpha: 1.0)
+                ]
+            )
+            return
+        }
+
+        if !latestAutoHint {
+            drawCard(rect, fill: UIColor(red: 0.12, green: 0.15, blue: 0.19, alpha: 1.0), border: UIColor(white: 1.0, alpha: 0.10))
+            NSString(string: "自動箭頭與走法提示已暫停\n（上方持續顯示我方勝率與 WDL 比例）").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 42, width: rect.width - 24, height: 50),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 14, weight: .bold),
+                    .foregroundColor: UIColor(white: 0.80, alpha: 1.0)
+                ]
+            )
+            return
+        }
+
+        guard let primary else {
+            drawCard(rect, fill: UIColor(red: 0.12, green: 0.15, blue: 0.19, alpha: 1.0), border: UIColor(white: 1.0, alpha: 0.10))
+            NSString(string: "目前無合法著法（對局可能已結束）").draw(
+                in: CGRect(x: rect.minX + 12, y: rect.minY + 54, width: rect.width - 24, height: 24),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 14, weight: .bold),
+                    .foregroundColor: UIColor(white: 0.80, alpha: 1.0)
+                ]
+            )
+            return
+        }
+
+        drawCard(rect, fill: UIColor(red: 0.115, green: 0.175, blue: 0.155, alpha: 1.0), border: UIColor(red: 0.30, green: 0.88, blue: 0.48, alpha: 0.65))
+        UIColor(red: 0.30, green: 0.88, blue: 0.48, alpha: 1.0).setFill()
+        UIBezierPath(roundedRect: CGRect(x: rect.minX, y: rect.minY, width: 6, height: rect.height), cornerRadius: 3).fill()
+
+        let movingPiece = latestBoard.piece(at: primary.bestMove.from)
+        let pieceFullName = movingPiece?.type.fullChineseName ?? "棋子"
+        let posHint = "\(primary.bestMove.from.relativePositionHint(for: latestPerspective)) -> \(primary.bestMove.to.relativePositionHint(for: latestPerspective))"
+        let reasonText = primary.tacticalReason.isEmpty
+            ? latestBoard.explainMoveTactics(primary.bestMove)
+            : primary.tacticalReason
+        let truncPara = NSMutableParagraphStyle()
+        truncPara.lineBreakMode = .byTruncatingTail
+
+        let padX = rect.minX + 14
+        let innerW = rect.width - 22
+
+        if latestCoachPieceOnlyMode {
+            NSString(string: "動：\(pieceFullName) (\(primary.bestMove.from.algebraic))").draw(
+                in: CGRect(x: padX, y: rect.minY + 12, width: innerW, height: 28),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 21, weight: .heavy),
+                    .foregroundColor: UIColor.white,
+                    .paragraphStyle: truncPara
+                ]
+            )
+            NSString(string: "螢幕位置：\(primary.bestMove.from.relativePositionHint(for: latestPerspective))（教練半提示）").draw(
+                in: CGRect(x: padX, y: rect.minY + 46, width: innerW, height: 22),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                    .foregroundColor: UIColor(red: 0.42, green: 0.88, blue: 1.0, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+        } else {
+            NSString(string: "#1 \(pieceFullName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]").draw(
+                in: CGRect(x: padX, y: rect.minY + 10, width: innerW, height: 26),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: compactForSplitLayout ? 18.5 : 22, weight: .heavy),
+                    .foregroundColor: UIColor.white,
+                    .paragraphStyle: truncPara
+                ]
+            )
+
+            NSString(string: "螢幕位置：\(posHint)").draw(
+                in: CGRect(x: padX, y: rect.minY + 40, width: innerW, height: 20),
+                withAttributes: [
+                    .font: UIFont.monospacedSystemFont(ofSize: 13.5, weight: .heavy),
+                    .foregroundColor: UIColor(red: 0.42, green: 0.88, blue: 1.0, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+
+            NSString(string: "目的：\(reasonText)").draw(
+                in: CGRect(x: padX, y: rect.minY + 64, width: innerW, height: 20),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                    .foregroundColor: UIColor(red: 0.64, green: 0.98, blue: 0.72, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+
+            let replyStr = (latestShowOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
+            let contStr = primary.continuationPreview.isEmpty ? "-" : primary.continuationPreview
+            NSString(string: "[敵應] \(replyStr) | 續著 \(contStr)").draw(
+                in: CGRect(x: padX, y: rect.minY + 89, width: innerW, height: 18),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 12.5, weight: .semibold),
+                    .foregroundColor: UIColor(white: 0.86, alpha: 1.0),
+                    .paragraphStyle: truncPara
+                ]
+            )
+        }
+
+        let warnStr: String
+        let warnColor: UIColor
+        if latestIsKingInCheck {
+            warnStr = "警示：國王被將軍中！受阻請按快轉換步"
+            warnColor = UIColor(red: 1.0, green: 0.52, blue: 0.52, alpha: 1.0)
+        } else if !latestPinnedSummary.isEmpty {
+            warnStr = "牽制：\(latestPinnedSummary)"
+            warnColor = UIColor(red: 1.0, green: 0.76, blue: 0.36, alpha: 1.0)
+        } else if latestHangingCount > 0 {
+            warnStr = "警訊：目前 \(latestHangingCount) 枚友子受威脅"
+            warnColor = UIColor(red: 1.0, green: 0.68, blue: 0.40, alpha: 1.0)
+        } else {
+            warnStr = "防封思考 \(latestThinkRange.isEmpty ? "2-4秒" : latestThinkRange) · 來源 \(latestAnalysis?.engineSource ?? "GM庫")"
+            warnColor = UIColor(white: 0.70, alpha: 1.0)
+        }
+        NSString(string: warnStr).draw(
+            in: CGRect(x: padX, y: rect.minY + 116, width: innerW, height: 18),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 12, weight: .bold),
+                .foregroundColor: warnColor,
+                .paragraphStyle: truncPara
+            ]
+        )
+    }
+
+    // MARK: - Chessboard & Tactical Arrow Drawing
+
+    private func drawDetectedChessBoard(
+        in boardRect: CGRect,
+        showCoordinateBadgesOnPrimary: Bool,
+        in cg: CGContext
+    ) {
+        let cellSize = boardRect.width / 8.0
+        let lightRGB = latestBoardTheme.lightRGB
+        let darkRGB = latestBoardTheme.darkRGB
+        let lightColor = UIColor(red: lightRGB.0, green: lightRGB.1, blue: lightRGB.2, alpha: 1.0)
+        let darkColor = UIColor(red: darkRGB.0, green: darkRGB.1, blue: darkRGB.2, alpha: 1.0)
+        let files = ["a", "b", "c", "d", "e", "f", "g", "h"]
+
+        let primary = latestAnalysis?.primaryLine
+        let showBestHighlights = !latestIsSafetyLocked && !latestIsWaitingForOpponentReply && latestAutoHint && primary != nil
+        let checkedColor: PieceColor? = latestBoard.isKingInCheck(.white)
+            ? .white
+            : (latestBoard.isKingInCheck(.black) ? .black : nil)
+
+        cg.saveGState()
+        UIBezierPath(roundedRect: boardRect, cornerRadius: 8).addClip()
+
+        for screenRow in 0..<8 {
+            for screenCol in 0..<8 {
+                let boardRow = latestPerspective == .white ? screenRow : (7 - screenRow)
+                let boardCol = latestPerspective == .white ? screenCol : (7 - screenCol)
+                let square = BoardSquare(row: boardRow, col: boardCol)
+                let sqRect = CGRect(
+                    x: boardRect.minX + CGFloat(screenCol) * cellSize,
+                    y: boardRect.minY + CGFloat(screenRow) * cellSize,
+                    width: cellSize,
+                    height: cellSize
+                )
+
+                (square.isLightSquare ? lightColor : darkColor).setFill()
+                cg.fill(sqRect)
+
+                if let lm = latestLastMove, lm.from == square || lm.to == square {
+                    UIColor(red: 0.96, green: 0.94, blue: 0.32, alpha: 0.34).setFill()
+                    cg.fill(sqRect)
+                }
+
+                if showBestHighlights, let best = primary?.bestMove {
+                    if best.from == square {
+                        UIColor(red: 0.35, green: 0.88, blue: 0.42, alpha: 0.35).setFill()
+                        cg.fill(sqRect)
+                    } else if !latestCoachPieceOnlyMode && best.to == square {
+                        UIColor(red: 0.35, green: 0.88, blue: 0.42, alpha: 0.48).setFill()
+                        cg.fill(sqRect)
+                    }
+                }
+
+                let piece = latestBoard.squares[boardRow][boardCol]
+                let isCheckedKingSq = (piece?.type == .king && piece?.color == checkedColor)
+                if isCheckedKingSq {
+                    UIColor(red: 0.96, green: 0.22, blue: 0.24, alpha: 0.58).setFill()
+                    cg.fill(sqRect)
+                    UIColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 0.95).setStroke()
+                    let checkBorder = UIBezierPath(rect: sqRect.insetBy(dx: 1.5, dy: 1.5))
+                    checkBorder.lineWidth = 2.5
+                    checkBorder.stroke()
+                }
+
+                let labelColor = square.isLightSquare ? darkColor : lightColor
+                if screenCol == 0 {
+                    NSString(string: "\(8 - boardRow)").draw(
+                        at: CGPoint(x: sqRect.minX + 2.5, y: sqRect.minY + 1.5),
+                        withAttributes: [
+                            .font: UIFont.systemFont(ofSize: max(9, cellSize * 0.22), weight: .bold),
+                            .foregroundColor: labelColor
+                        ]
+                    )
+                }
+                if screenRow == 7 {
+                    let fileAttr: [NSAttributedString.Key: Any] = [
+                        .font: UIFont.systemFont(ofSize: max(9, cellSize * 0.22), weight: .bold),
+                        .foregroundColor: labelColor
+                    ]
+                    let fileText = NSString(string: files[boardCol])
+                    let fSize = fileText.size(withAttributes: fileAttr)
+                    fileText.draw(
+                        at: CGPoint(x: sqRect.maxX - fSize.width - 2.5, y: sqRect.maxY - fSize.height - 1.0),
+                        withAttributes: fileAttr
+                    )
+                }
+
+                if let piece {
+                    drawPieceGlyph(piece, in: sqRect)
+                }
+
+                if isCheckedKingSq {
+                    let chkRect = CGRect(x: sqRect.maxX - 28, y: sqRect.minY + 1.5, width: 26.5, height: 12.5)
+                    UIColor(red: 0.90, green: 0.14, blue: 0.18, alpha: 0.95).setFill()
+                    UIBezierPath(roundedRect: chkRect, cornerRadius: 3).fill()
+                    let chkStyle = NSMutableParagraphStyle()
+                    chkStyle.alignment = .center
+                    NSString(string: "將軍").draw(
+                        in: CGRect(x: chkRect.minX, y: chkRect.minY + 0.5, width: chkRect.width, height: 11.5),
+                        withAttributes: [
+                            .font: UIFont.systemFont(ofSize: 8.5, weight: .heavy),
+                            .foregroundColor: UIColor.white,
+                            .paragraphStyle: chkStyle
+                        ]
+                    )
+                }
+            }
+        }
+
+        // Overlay Arrows when allowed
+        if !latestIsSafetyLocked && !latestIsWaitingForOpponentReply && latestAutoHint,
+           let lines = latestAnalysis?.lines, !lines.isEmpty {
+            if latestCoachPieceOnlyMode, let first = lines.first {
+                let pt = squareCenter(for: first.bestMove.from, boardOrigin: boardRect.origin, cellSize: cellSize)
+                let ringRect = CGRect(
+                    x: pt.x - cellSize * 0.42,
+                    y: pt.y - cellSize * 0.42,
+                    width: cellSize * 0.84,
+                    height: cellSize * 0.84
+                )
+                UIColor(red: 0.35, green: 0.90, blue: 0.44, alpha: 0.95).setStroke()
+                let ring = UIBezierPath(ovalIn: ringRect)
+                ring.lineWidth = max(3.5, cellSize * 0.08)
+                ring.stroke()
+            } else {
+                let arrowColors: [Int: UIColor] = [
+                    1: UIColor(red: 0.30, green: 0.90, blue: 0.42, alpha: 0.92),
+                    2: UIColor(red: 0.22, green: 0.78, blue: 0.96, alpha: 0.78),
+                    3: UIColor(red: 0.98, green: 0.72, blue: 0.22, alpha: 0.74)
+                ]
+                for line in lines.prefix(3).reversed() {
+                    let color = arrowColors[line.multipvIndex] ?? UIColor.systemOrange
+                    let width: CGFloat = line.multipvIndex == 1 ? max(7.0, cellSize * 0.21) : max(4.5, cellSize * 0.13)
+                    drawArrow(
+                        from: line.bestMove.from,
+                        to: line.bestMove.to,
+                        boardOrigin: boardRect.origin,
+                        cellSize: cellSize,
+                        color: color,
+                        lineWidth: width,
+                        isDashed: false,
+                        rankBadge: lines.count > 1 ? "\(line.multipvIndex)" : nil,
+                        in: cg
+                    )
+                }
+
+                if latestShowOpponentReplyArrow, let reply = lines.first?.predictedOpponentReply {
+                    drawArrow(
+                        from: reply.from,
+                        to: reply.to,
+                        boardOrigin: boardRect.origin,
+                        cellSize: cellSize,
+                        color: UIColor(red: 1.0, green: 0.32, blue: 0.36, alpha: 0.88),
+                        lineWidth: max(4.5, cellSize * 0.13),
+                        isDashed: true,
+                        rankBadge: "敵",
+                        in: cg
+                    )
+                }
+
+                if showCoordinateBadgesOnPrimary, let first = lines.first {
+                    drawSquareCoordinateBadge(
+                        text: "起:\(first.bestMove.from.algebraic)",
+                        square: first.bestMove.from,
+                        boardOrigin: boardRect.origin,
+                        cellSize: cellSize,
+                        fillColor: UIColor(red: 0.12, green: 0.45, blue: 0.22, alpha: 0.92)
+                    )
+                    drawSquareCoordinateBadge(
+                        text: "落:\(first.bestMove.to.algebraic)",
+                        square: first.bestMove.to,
+                        boardOrigin: boardRect.origin,
+                        cellSize: cellSize,
+                        fillColor: UIColor(red: 0.14, green: 0.60, blue: 0.28, alpha: 0.95)
+                    )
+                }
+            }
+        }
+
+        cg.restoreGState()
+
+        UIColor(white: 1.0, alpha: 0.18).setStroke()
+        let boardOutline = UIBezierPath(roundedRect: boardRect, cornerRadius: 8)
+        boardOutline.lineWidth = 1.5
+        boardOutline.stroke()
+    }
+
+    private func squareCenter(for square: BoardSquare, boardOrigin: CGPoint, cellSize: CGFloat) -> CGPoint {
+        let screenCol = latestPerspective == .white ? square.col : (7 - square.col)
+        let screenRow = latestPerspective == .white ? square.row : (7 - square.row)
+        return CGPoint(
+            x: boardOrigin.x + (CGFloat(screenCol) + 0.5) * cellSize,
+            y: boardOrigin.y + (CGFloat(screenRow) + 0.5) * cellSize
+        )
+    }
+
+    private func drawPieceGlyph(_ piece: ChessPiece, in rect: CGRect) {
+        let glyph = piece.solidUnicode as NSString
+        let fontSize = rect.width * 0.78
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .regular)
+
+        let textSize = glyph.size(withAttributes: [.font: font])
+        let origin = CGPoint(
+            x: rect.midX - textSize.width / 2.0,
+            y: rect.midY - textSize.height / 2.0
+        )
+
+        if piece.color == .white {
+            let strokeAttrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: UIColor(red: 0.99, green: 0.99, blue: 0.97, alpha: 1.0),
+                .strokeColor: UIColor(white: 0.10, alpha: 1.0),
+                .strokeWidth: -4.2
+            ]
+            glyph.draw(at: origin, withAttributes: strokeAttrs)
+        } else {
+            let rimAttrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: UIColor(red: 0.12, green: 0.13, blue: 0.15, alpha: 1.0),
+                .strokeColor: UIColor(white: 0.95, alpha: 0.45),
+                .strokeWidth: -2.2
+            ]
+            glyph.draw(at: origin, withAttributes: rimAttrs)
+        }
+    }
+
+    private func drawArrow(
+        from: BoardSquare,
+        to: BoardSquare,
+        boardOrigin: CGPoint,
+        cellSize: CGFloat,
+        color: UIColor,
+        lineWidth: CGFloat,
+        isDashed: Bool,
+        rankBadge: String?,
+        in cg: CGContext
+    ) {
+        let p0 = squareCenter(for: from, boardOrigin: boardOrigin, cellSize: cellSize)
+        let p1 = squareCenter(for: to, boardOrigin: boardOrigin, cellSize: cellSize)
+        let dx = p1.x - p0.x
+        let dy = p1.y - p0.y
+        let length = hypot(dx, dy)
+        guard length > 4 else { return }
+
+        let ux = dx / length
+        let uy = dy / length
+        let headLength = lineWidth * 2.25
+        let headHalfWidth = lineWidth * 1.28
+
+        let shaftStart = CGPoint(x: p0.x + ux * (lineWidth * 0.55), y: p0.y + uy * (lineWidth * 0.55))
+        let shaftEnd = CGPoint(x: p1.x - ux * (headLength * 0.70), y: p1.y - uy * (headLength * 0.70))
+
+        cg.saveGState()
+        color.setStroke()
+        cg.setLineWidth(lineWidth)
+        cg.setLineCap(.round)
+        cg.setLineJoin(.round)
+        if isDashed {
+            cg.setLineDash(phase: 0, lengths: [max(5, lineWidth * 1.15), max(4, lineWidth * 0.95)])
+        }
+        cg.move(to: shaftStart)
+        cg.addLine(to: shaftEnd)
+        cg.strokePath()
+        cg.restoreGState()
+
+        let perpX = -uy
+        let perpY = ux
+        let baseCenter = CGPoint(x: p1.x - ux * headLength, y: p1.y - uy * headLength)
+        let leftWing = CGPoint(x: baseCenter.x + perpX * headHalfWidth, y: baseCenter.y + perpY * headHalfWidth)
+        let rightWing = CGPoint(x: baseCenter.x - perpX * headHalfWidth, y: baseCenter.y - perpY * headHalfWidth)
+
+        let headPath = UIBezierPath()
+        headPath.move(to: p1)
+        headPath.addLine(to: leftWing)
+        headPath.addLine(to: rightWing)
+        headPath.close()
+        color.setFill()
+        headPath.fill()
+
+        if let rankBadge {
+            let badgeCenter = CGPoint(x: p0.x + ux * (length * 0.36), y: p0.y + uy * (length * 0.36))
+            let radius: CGFloat = max(8.0, lineWidth * 0.92)
+            let circleRect = CGRect(
+                x: badgeCenter.x - radius,
+                y: badgeCenter.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            )
+            UIColor(red: 0.08, green: 0.10, blue: 0.12, alpha: 0.95).setFill()
+            UIBezierPath(ovalIn: circleRect).fill()
+            color.setStroke()
+            let ring = UIBezierPath(ovalIn: circleRect)
+            ring.lineWidth = 1.5
+            ring.stroke()
+
+            let centerStyle = NSMutableParagraphStyle()
+            centerStyle.alignment = .center
+            let badgeFont = UIFont.systemFont(ofSize: radius * 1.1, weight: .heavy)
+            NSString(string: rankBadge).draw(
+                in: CGRect(
+                    x: circleRect.minX,
+                    y: circleRect.midY - badgeFont.lineHeight / 2.0,
+                    width: circleRect.width,
+                    height: badgeFont.lineHeight
+                ),
+                withAttributes: [
+                    .font: badgeFont,
+                    .foregroundColor: UIColor.white,
+                    .paragraphStyle: centerStyle
+                ]
+            )
+        }
+    }
+
+    private func drawSquareCoordinateBadge(
+        text: String,
+        square: BoardSquare,
+        boardOrigin: CGPoint,
+        cellSize: CGFloat,
+        fillColor: UIColor
+    ) {
+        let screenCol = latestPerspective == .white ? square.col : (7 - square.col)
+        let screenRow = latestPerspective == .white ? square.row : (7 - square.row)
+        let sqOrigin = CGPoint(
+            x: boardOrigin.x + CGFloat(screenCol) * cellSize,
+            y: boardOrigin.y + CGFloat(screenRow) * cellSize
+        )
+        let badgeW = min(cellSize - 4, 42)
+        let badgeRect = CGRect(x: sqOrigin.x + 2, y: sqOrigin.y + 2, width: badgeW, height: 15)
+        fillColor.setFill()
+        UIBezierPath(roundedRect: badgeRect, cornerRadius: 4).fill()
+
+        let centerStyle = NSMutableParagraphStyle()
+        centerStyle.alignment = .center
+        NSString(string: text).draw(
+            in: CGRect(x: badgeRect.minX + 1, y: badgeRect.minY + 1, width: badgeRect.width - 2, height: 13),
+            withAttributes: [
+                .font: UIFont.monospacedSystemFont(ofSize: 9.5, weight: .heavy),
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: centerStyle
+            ]
+        )
+    }
+
+    // MARK: - HUD Drawing Helpers
+
+    private func drawCard(_ rect: CGRect, fill: UIColor, border: UIColor) {
+        fill.setFill()
+        UIBezierPath(roundedRect: rect, cornerRadius: 12).fill()
+        border.setStroke()
+        let outline = UIBezierPath(roundedRect: rect, cornerRadius: 12)
+        outline.lineWidth = 1.4
+        outline.stroke()
+    }
+
+    private func drawStatusPill(rect: CGRect, text: String, color: UIColor) {
+        color.withAlphaComponent(0.16).setFill()
+        UIBezierPath(roundedRect: rect, cornerRadius: 7).fill()
+        color.withAlphaComponent(0.58).setStroke()
+        let border = UIBezierPath(roundedRect: rect, cornerRadius: 7)
+        border.lineWidth = 1.2
+        border.stroke()
+
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        NSString(string: text).draw(
+            in: CGRect(x: rect.minX + 3, y: rect.minY + 3, width: rect.width - 6, height: 16),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 11.5, weight: .heavy),
+                .foregroundColor: color,
+                .paragraphStyle: center
+            ]
+        )
+    }
+
+    private func drawWDLBar(rect: CGRect, wdl: (win: Int, draw: Int, loss: Int), in cg: CGContext) {
+        let winW = rect.width * CGFloat(wdl.win) / 100.0
+        let drawW = rect.width * CGFloat(wdl.draw) / 100.0
+        let lossW = max(0, rect.width - winW - drawW)
+        cg.saveGState()
+        UIBezierPath(roundedRect: rect, cornerRadius: rect.height / 2.0).addClip()
+        UIColor(red: 0.30, green: 0.86, blue: 0.44, alpha: 1.0).setFill()
+        cg.fill(CGRect(x: rect.minX, y: rect.minY, width: winW, height: rect.height))
+        UIColor(white: 0.48, alpha: 1.0).setFill()
+        cg.fill(CGRect(x: rect.minX + winW, y: rect.minY, width: drawW, height: rect.height))
+        UIColor(red: 0.92, green: 0.34, blue: 0.38, alpha: 1.0).setFill()
+        cg.fill(CGRect(x: rect.minX + winW + drawW, y: rect.minY, width: lossW, height: rect.height))
+        cg.restoreGState()
+    }
+
+    private func drawFooterStrip(rect: CGRect, defaultText: String) {
+        if pipBannerText != nil {
+            UIColor(red: 0.16, green: 0.34, blue: 0.22, alpha: 0.95).setFill()
+            UIBezierPath(roundedRect: rect, cornerRadius: 7).fill()
+        }
+        let footerPara = NSMutableParagraphStyle()
+        footerPara.alignment = .center
+        footerPara.lineBreakMode = .byTruncatingTail
+        NSString(string: pipBannerText ?? defaultText).draw(
+            in: CGRect(x: rect.minX + 6, y: rect.minY + 3, width: rect.width - 12, height: 18),
+            withAttributes: [
+                .font: UIFont.systemFont(ofSize: 12.5, weight: .bold),
+                .foregroundColor: pipBannerText != nil
+                    ? UIColor(red: 0.62, green: 0.98, blue: 0.68, alpha: 1.0)
+                    : UIColor(white: 0.74, alpha: 1.0),
+                .paragraphStyle: footerPara
+            ]
+        )
+    }
+
+    private func winRateColor(_ winPct: Int) -> UIColor {
+        if winPct >= 52 {
+            return UIColor(red: 0.35, green: 0.92, blue: 0.48, alpha: 1.0)
+        } else if winPct >= 44 {
+            return UIColor(red: 0.98, green: 0.82, blue: 0.32, alpha: 1.0)
+        } else {
+            return UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
+        }
+    }
+
+    private func resolveCurrentStatusTuple() -> (title: String, color: UIColor) {
+        if latestIsSafetyLocked {
+            return ("[安全鎖定]", UIColor(red: 1.0, green: 0.42, blue: 0.42, alpha: 1.0))
+        } else if latestIsKingInCheck {
+            return ("[國王將軍]", UIColor(red: 1.0, green: 0.42, blue: 0.42, alpha: 1.0))
+        } else if latestPinnedCount > 0 {
+            return ("[牽制×\(latestPinnedCount)]", UIColor(red: 1.0, green: 0.68, blue: 0.25, alpha: 1.0))
+        } else if latestIsWaitingForOpponentReply {
+            return ("[等待對手]", UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0))
+        } else if latestPaceRemainingSeconds > 0 {
+            return ("[停頓 \(latestPaceRemainingSeconds)s]", UIColor(red: 0.98, green: 0.82, blue: 0.34, alpha: 1.0))
+        } else {
+            return ("[輪到我方]", UIColor(red: 0.42, green: 0.92, blue: 0.54, alpha: 1.0))
         }
     }
 
