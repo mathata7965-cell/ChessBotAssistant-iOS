@@ -22,6 +22,8 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
     private var lastProcessedTime: CFTimeInterval = 0
     private var lastBoard: ChessBoardState = .startingPosition
     private var lastPerspective: PieceColor = .white
+    private var pendingPlacementKey: String?
+    private var pendingMatchCount: Int = 0
     private let ciContext = CIContext(options: [.useSoftwareRenderer: true])
     private var udpFD: Int32 = -1
 
@@ -29,6 +31,8 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
         lastProcessedTime = 0
         lastBoard = .startingPosition
         lastPerspective = .white
+        pendingPlacementKey = nil
+        pendingMatchCount = 0
         openUDPSocketIfNeeded()
     }
 
@@ -84,6 +88,22 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
                 includePNGCrop: false
             ) else {
                 return
+            }
+
+            let placementKey = result.boardState.positionKey.split(separator: " ").first.map(String.init) ?? ""
+            if result.notes.contains("步") {
+                pendingPlacementKey = nil
+                pendingMatchCount = 0
+            } else {
+                if pendingPlacementKey == placementKey {
+                    pendingMatchCount += 1
+                } else {
+                    pendingPlacementKey = placementKey
+                    pendingMatchCount = 1
+                }
+                guard pendingMatchCount >= 2 else { return }
+                pendingPlacementKey = nil
+                pendingMatchCount = 0
             }
 
             lastBoard = result.boardState

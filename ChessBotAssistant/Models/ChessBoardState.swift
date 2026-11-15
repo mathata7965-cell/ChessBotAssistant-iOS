@@ -697,6 +697,9 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
         let openingName = detectOpeningName(moveHistorySAN: moveHistorySAN, totalNonKingPieces: totalNonKingPieces)
 
         let inCheck = isKingInCheck(camp)
+        let checkers = inCheck ? checkingPieces(for: camp) : []
+        let checkingDescs = checkers.map { "\($0.piece.type.displayName)\($0.square.algebraic)" }
+        let pins = pinnedPieces(for: camp)
         let tensionCount = hangingFriendlySquares.count + freeTargetDescriptions.count
         let thinkRange: String
         if inCheck || tensionCount >= 2 {
@@ -717,8 +720,186 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
             hangingDescriptions: Array(hangingDescriptions.prefix(3)),
             freeTargetDescriptions: Array(freeTargetDescriptions.prefix(3)),
             openingName: openingName,
-            recommendedThinkRange: thinkRange
+            recommendedThinkRange: thinkRange,
+            isKingInCheck: inCheck,
+            checkingDescriptions: Array(checkingDescs.prefix(2)),
+            pinnedPieces: Array(pins.prefix(3))
         )
+    }
+
+    func checkingPieces(for camp: PieceColor) -> [(square: BoardSquare, piece: ChessPiece)] {
+        guard let kingSq = findKing(color: camp) else { return [] }
+        let enemy = camp.opposite
+        var attackers: [(square: BoardSquare, piece: ChessPiece)] = []
+        let row = kingSq.row
+        let col = kingSq.col
+
+        let pawnSourceRow = enemy == .white ? row + 1 : row - 1
+        if pawnSourceRow >= 0 && pawnSourceRow < 8 {
+            for dc in [-1, 1] {
+                let c = col + dc
+                if c >= 0 && c < 8,
+                   let p = squares[pawnSourceRow][c],
+                   p.color == enemy && p.type == .pawn {
+                    attackers.append((BoardSquare(row: pawnSourceRow, col: c), p))
+                }
+            }
+        }
+
+        let knightOffsets = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+        for (dr, dc) in knightOffsets {
+            let r = row + dr, c = col + dc
+            if r >= 0 && r < 8 && c >= 0 && c < 8,
+               let p = squares[r][c],
+               p.color == enemy && p.type == .knight {
+                attackers.append((BoardSquare(row: r, col: c), p))
+            }
+        }
+
+        let orthoDirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        for (dr, dc) in orthoDirs {
+            var r = row + dr, c = col + dc
+            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+                if let p = squares[r][c] {
+                    if p.color == enemy && (p.type == .rook || p.type == .queen) {
+                        attackers.append((BoardSquare(row: r, col: c), p))
+                    }
+                    break
+                }
+                r += dr; c += dc
+            }
+        }
+
+        let diagDirs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        for (dr, dc) in diagDirs {
+            var r = row + dr, c = col + dc
+            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+                if let p = squares[r][c] {
+                    if p.color == enemy && (p.type == .bishop || p.type == .queen) {
+                        attackers.append((BoardSquare(row: r, col: c), p))
+                    }
+                    break
+                }
+                r += dr; c += dc
+            }
+        }
+        return attackers
+    }
+
+    func pinnedPieces(for camp: PieceColor) -> [PinnedPieceInfo] {
+        guard let kingSq = findKing(color: camp) else { return [] }
+        let enemy = camp.opposite
+        var pins: [PinnedPieceInfo] = []
+
+        let dirs: [(dr: Int, dc: Int, isDiagonal: Bool)] = [
+            (-1, 0, false), (1, 0, false), (0, -1, false), (0, 1, false),
+            (-1, -1, true), (-1, 1, true), (1, -1, true), (1, 1, true)
+        ]
+
+        for dir in dirs {
+            var r = kingSq.row + dir.dr
+            var c = kingSq.col + dir.dc
+            var candidateFriendly: (square: BoardSquare, piece: ChessPiece)? = nil
+
+            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+                if let p = squares[r][c] {
+                    if p.color == camp {
+                        if candidateFriendly == nil {
+                            candidateFriendly = (BoardSquare(row: r, col: c), p)
+                        } else {
+                            break
+                        }
+                    } else if p.color == enemy {
+                        if let friendly = candidateFriendly {
+                            let isPinningSlider = dir.isDiagonal
+                                ? (p.type == .bishop || p.type == .queen)
+                                : (p.type == .rook || p.type == .queen)
+                            if isPinningSlider {
+                                pins.append(PinnedPieceInfo(
+                                    square: friendly.square,
+                                    piece: friendly.piece,
+                                    attackerSquare: BoardSquare(row: r, col: c),
+                                    attackerPiece: p
+                                ))
+                            }
+                        }
+                        break
+                    }
+                }
+                r += dir.dr
+                c += dir.dc
+            }
+        }
+        return pins
+    }
+
+    func explainMoveTactics(_ move: ChessMove) -> String {
+        let mover = piece(at: move.from)
+        let after = applyingRaw(move)
+        let enemy = sideToMove.opposite
+
+        if isKingInCheck(sideToMove) {
+            if mover?.type == .king {
+                return "王正被將軍：移開國王至安全格 (\(move.to.algebraic)) 解圍"
+            }
+            if let cap = move.capturedPiece {
+                return "王正被將軍：直接吃掉\(move.to.algebraic)攻擊子(\(cap.type.displayName))解圍"
+            }
+            return "王正被將軍：調動\(mover?.type.displayName ?? "棋子")擋住將軍線保護國王"
+        }
+
+        let san = move.san.isEmpty ? formatSAN(for: move) : move.san
+        if san.hasSuffix("#") {
+            return "致命一擊：直接將殺對手國王"
+        }
+        if move.isCastling {
+            return "王車易位：將國王藏入安全翼並同時出動城堡"
+        }
+        if let promo = move.promotion {
+            return "兵底線升變：升變為\(promo.fullChineseName)大幅擴大子力"
+        }
+
+        if let cap = move.capturedPiece {
+            let isTargetDefended = after.isSquareAttacked(row: move.to.row, col: move.to.col, by: enemy)
+            if !isTargetDefended {
+                return "白吃得子：吃掉無保護的敵方\(cap.type.displayName) (\(move.to.algebraic))"
+            }
+            if let m = mover, cap.baseValue > m.baseValue {
+                return "賺子交換：以\(m.type.displayName)換取高價值敵方\(cap.type.displayName)"
+            }
+            return "主動兌子：吃掉\(move.to.algebraic)敵方\(cap.type.displayName)消滅威脅"
+        }
+
+        if san.hasSuffix("+") {
+            return "先手將軍：強迫對手應將以搶得戰術先手"
+        }
+
+        // Check if move threatens enemy Queen or valuable piece
+        for r in 0..<8 {
+            for c in 0..<8 {
+                if let p = after.squares[r][c], p.color == enemy, p.type == .queen {
+                    if !isSquareAttacked(row: r, col: c, by: sideToMove) && after.isSquareAttacked(row: r, col: c, by: sideToMove) {
+                        return "攻后奪先：走子威脅\(BoardSquare(row: r, col: c).algebraic)敵方皇后，搶占先手"
+                    }
+                }
+            }
+        }
+
+        // Check if move rescues a previously hanging friendly piece
+        if let m = mover,
+           isSquareAttacked(row: move.from.row, col: move.from.col, by: enemy),
+           !after.isSquareAttacked(row: move.to.row, col: move.to.col, by: enemy) {
+            return "避險脫身：將受威脅的\(m.type.displayName)移至安全格 \(move.to.algebraic)"
+        }
+
+        let centerSquares = [(3, 3), (3, 4), (4, 3), (4, 4)]
+        if centerSquares.contains(where: { $0.0 == move.to.row && $0.1 == move.to.col }) {
+            return "控制中心：搶占核心要道與子力活躍格"
+        }
+        if let m = mover, (m.type == .knight || m.type == .bishop) && (move.from.row == 0 || move.from.row == 7) {
+            return "出子爭先：活化\(m.type.fullChineseName)並加速王翼/后翼展開"
+        }
+        return "穩健推進：改善子力協調與王翼長期安全"
     }
 
     private func lowestAttackerValue(row: Int, col: Int, by attacker: PieceColor) -> Int? {

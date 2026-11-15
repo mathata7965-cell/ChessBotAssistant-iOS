@@ -237,6 +237,10 @@ final class OfflineEnginePack: @unchecked Sendable {
                 continuationUCI: uciLine
             )
 
+            let reason = entry.note.isEmpty
+                ? board.explainMoveTactics(bestMove)
+                : "\(entry.opening)：\(entry.note)"
+
             pvLines.append(PVLine(
                 multipvIndex: pvLines.count + 1,
                 bestMove: bestMove,
@@ -245,8 +249,9 @@ final class OfflineEnginePack: @unchecked Sendable {
                 scoreCentipawns: entry.cp,
                 mateInMoves: nil,
                 depth: 20,
-                sourceLabel: "📚 GM大師庫",
-                predictedOpponentReply: reply
+                sourceLabel: "GM大師庫",
+                predictedOpponentReply: reply,
+                tacticalReason: reason
             ))
 
             if pvLines.count >= multiPV { break }

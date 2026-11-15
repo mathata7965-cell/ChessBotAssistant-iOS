@@ -108,7 +108,7 @@ struct ScreenshotScannerSheetView: View {
                                        !rec.isConfirmedBotMatch {
                                         viewModel.isFairPlaySafetyLocked = true
                                         viewModel.safetyLockReason = rec.detectedMatchContextNote
-                                        viewModel.showBanner("⚠️ \(rec.detectedMatchContextNote)")
+                                        viewModel.showBanner("[安全鎖定] \(rec.detectedMatchContextNote)")
                                     } else {
                                         viewModel.isFairPlaySafetyLocked = false
                                         viewModel.safetyLockReason = nil

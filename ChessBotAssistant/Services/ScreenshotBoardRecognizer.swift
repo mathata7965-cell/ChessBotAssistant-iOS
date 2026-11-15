@@ -637,6 +637,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         // Pass 1: Extract foreground masks & luminance/tint scores for adaptive two-cluster color split
         var fgGrid: [[ForegroundCellMask?]] = Array(repeating: Array(repeating: nil, count: 8), count: 8)
         var screenHighlights: [[Bool]] = Array(repeating: Array(repeating: false, count: 8), count: 8)
+        var redCheckSquares: [[Bool]] = Array(repeating: Array(repeating: false, count: 8), count: 8)
         var colorScores: [Double] = []
         colorScores.reserveCapacity(32)
 
@@ -652,7 +653,9 @@ final class ScreenshotBoardRecognizer: Sendable {
                     cellSize: cellSize
                 )
                 let bgDist = localCorner.distance(to: globalBG)
-                let isHighlighted = screenRow >= 1 && bgDist > 34.0
+                let isRedCheck = (localCorner.r - localCorner.g > 36.0) && (localCorner.r > 150.0)
+                redCheckSquares[screenRow][screenCol] = isRedCheck
+                let isHighlighted = (screenRow >= 1 && bgDist > 34.0) || isRedCheck
                 screenHighlights[screenRow][screenCol] = isHighlighted
                 let bg = bgDist > 18.0 ? localCorner : globalBG
 
@@ -700,10 +703,11 @@ final class ScreenshotBoardRecognizer: Sendable {
                 }
 
                 let result = classifyPieceFromMask(fgMask, pieceColor: pieceColor)
+                let checkKingBoost = redCheckSquares[screenRow][screenCol] ? 4.5 : 0.0
                 screenCells[screenRow][screenCol] = ScreenCellSample(
                     piece: result.piece,
                     confidence: result.confidence,
-                    kingLikelihood: result.kingLikelihood,
+                    kingLikelihood: result.kingLikelihood + checkKingBoost,
                     coverage: result.coverage,
                     isHighlighted: fgMask.isHighlighted
                 )
@@ -847,6 +851,9 @@ final class ScreenshotBoardRecognizer: Sendable {
         var whiteKingCandidates: [(row: Int, col: Int, score: Double)] = []
         var blackKingCandidates: [(row: Int, col: Int, score: Double)] = []
 
+        let prevWhiteKing = previousBoard.findKing(color: .white)
+        let prevBlackKing = previousBoard.findKing(color: .black)
+
         for r in 0..<8 {
             for c in 0..<8 {
                 if let obs = observed[r][c] {
@@ -854,11 +861,29 @@ final class ScreenshotBoardRecognizer: Sendable {
                     if obs.confidence >= 0.88 {
                         highConfCount += 1
                     }
-                    if obs.guessedPiece.type == .king || obs.kingLikelihood > 0.45 {
+                    let isNearPrevWhiteKing = prevWhiteKing.map { max(abs($0.row - r), abs($0.col - c)) <= 1 || ($0.row == 7 && $0.col == 4 && r == 7 && (c == 2 || c == 6)) } ?? false
+                    let isNearPrevBlackKing = prevBlackKing.map { max(abs($0.row - r), abs($0.col - c)) <= 1 || ($0.row == 0 && $0.col == 4 && r == 0 && (c == 2 || c == 6)) } ?? false
+
+                    if obs.guessedPiece.type == .king || obs.kingLikelihood > 0.45 || (obs.color == .white && isNearPrevWhiteKing) || (obs.color == .black && isNearPrevBlackKing) {
+                        var kingScore = obs.kingLikelihood
                         if obs.color == .white {
-                            whiteKingCandidates.append((r, c, obs.kingLikelihood))
+                            if let pk = prevWhiteKing {
+                                if pk.row == r && pk.col == c {
+                                    kingScore += 3.5
+                                } else if isNearPrevWhiteKing {
+                                    kingScore += 2.2
+                                }
+                            }
+                            whiteKingCandidates.append((r, c, kingScore))
                         } else {
-                            blackKingCandidates.append((r, c, obs.kingLikelihood))
+                            if let pk = prevBlackKing {
+                                if pk.row == r && pk.col == c {
+                                    kingScore += 3.5
+                                } else if isNearPrevBlackKing {
+                                    kingScore += 2.2
+                                }
+                            }
+                            blackKingCandidates.append((r, c, kingScore))
                         }
                     }
                 }
@@ -928,13 +953,14 @@ final class ScreenshotBoardRecognizer: Sendable {
             }
         }
 
-        ensureKingPresence(grid: &grid, color: .white, candidates: whiteKingCandidates)
-        ensureKingPresence(grid: &grid, color: .black, candidates: blackKingCandidates)
+        ensureKingPresence(grid: &grid, color: .white, candidates: whiteKingCandidates, previousBoard: previousBoard)
+        ensureKingPresence(grid: &grid, color: .black, candidates: blackKingCandidates, previousBoard: previousBoard)
         enforceSingleKingPerSide(
             grid: &grid,
             observed: observed,
             whiteCandidates: whiteKingCandidates,
-            blackCandidates: blackKingCandidates
+            blackCandidates: blackKingCandidates,
+            previousBoard: previousBoard
         )
 
         var castling = CastlingRights.none
@@ -945,6 +971,12 @@ final class ScreenshotBoardRecognizer: Sendable {
         if grid[0][4] == ChessPiece(color: .black, type: .king) {
             if grid[0][7] == ChessPiece(color: .black, type: .rook) { castling.blackKingside = true }
             if grid[0][0] == ChessPiece(color: .black, type: .rook) { castling.blackQueenside = true }
+        }
+        if refBoard == previousBoard && previousBoard != .startingPosition {
+            castling.whiteKingside = castling.whiteKingside && previousBoard.castlingRights.whiteKingside
+            castling.whiteQueenside = castling.whiteQueenside && previousBoard.castlingRights.whiteQueenside
+            castling.blackKingside = castling.blackKingside && previousBoard.castlingRights.blackKingside
+            castling.blackQueenside = castling.blackQueenside && previousBoard.castlingRights.blackQueenside
         }
 
         let state = ChessBoardState(
@@ -1260,7 +1292,8 @@ final class ScreenshotBoardRecognizer: Sendable {
     private func ensureKingPresence(
         grid: inout [[ChessPiece?]],
         color: PieceColor,
-        candidates: [(row: Int, col: Int, score: Double)]
+        candidates: [(row: Int, col: Int, score: Double)],
+        previousBoard: ChessBoardState
     ) {
         var kingCount = 0
         for r in 0..<8 {
@@ -1270,8 +1303,13 @@ final class ScreenshotBoardRecognizer: Sendable {
                 }
             }
         }
-        if kingCount == 0, let best = candidates.max(by: { $0.score < $1.score }) {
-            grid[best.row][best.col] = ChessPiece(color: color, type: .king)
+        if kingCount == 0 {
+            if let best = candidates.max(by: { $0.score < $1.score }) {
+                grid[best.row][best.col] = ChessPiece(color: color, type: .king)
+            } else if let prevKing = previousBoard.findKing(color: color),
+                      grid[prevKing.row][prevKing.col]?.color == color {
+                grid[prevKing.row][prevKing.col] = ChessPiece(color: color, type: .king)
+            }
         }
     }
 
@@ -1279,17 +1317,29 @@ final class ScreenshotBoardRecognizer: Sendable {
         grid: inout [[ChessPiece?]],
         observed: [[CellObservation?]],
         whiteCandidates: [(row: Int, col: Int, score: Double)],
-        blackCandidates: [(row: Int, col: Int, score: Double)]
+        blackCandidates: [(row: Int, col: Int, score: Double)],
+        previousBoard: ChessBoardState
     ) {
         for color in [PieceColor.white, PieceColor.black] {
             let candidates = color == .white ? whiteCandidates : blackCandidates
+            let prevKing = previousBoard.findKing(color: color)
+            let homeRow = color == .white ? 7 : 0
             var kingPositions: [(row: Int, col: Int, score: Double)] = []
             for r in 0..<8 {
                 for c in 0..<8 {
                     if grid[r][c]?.color == color && grid[r][c]?.type == .king {
-                        let candScore = candidates.first(where: { $0.row == r && $0.col == c })?.score
+                        var candScore = candidates.first(where: { $0.row == r && $0.col == c })?.score
                             ?? observed[r][c]?.kingLikelihood
                             ?? 0.0
+                        if let pk = prevKing {
+                            if pk.row == r && pk.col == c {
+                                candScore += 3.5
+                            } else if max(abs(pk.row - r), abs(pk.col - c)) <= 1 {
+                                candScore += 2.0
+                            }
+                        } else if r == homeRow && (c == 4 || c == 6 || c == 2) {
+                            candScore += 2.0
+                        }
                         kingPositions.append((r, c, candScore))
                     }
                 }
@@ -1470,7 +1520,7 @@ final class ScreenshotBoardRecognizer: Sendable {
                 bestTmplType = tmpl.type
             }
         }
-        if bestTmplDist < 285 {
+        if bestTmplDist < 170 {
             let tmplKingLikelihood = bestTmplType == .king ? 1.2 : max(0.0, 1.0 - Double(kingTmplDist) / 400.0)
             return (ChessPiece(color: pieceColor, type: bestTmplType), 0.94, tmplKingLikelihood, coverage)
         }

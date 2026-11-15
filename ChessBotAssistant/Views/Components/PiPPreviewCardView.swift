@@ -40,10 +40,17 @@ struct PiPPreviewCardView: View {
 
                     Spacer()
 
-                    Text("⏯掃描 ⏩走步 ⏪悔步")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color(white: 0.62))
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Image(systemName: "playpause.fill")
+                        Text("掃描")
+                        Image(systemName: "forward.fill")
+                        Text("走步")
+                        Image(systemName: "backward.fill")
+                        Text("悔步")
+                    }
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(Color(white: 0.65))
+                    .lineLimit(1)
                 }
 
                 HStack(spacing: 5) {
@@ -77,7 +84,8 @@ struct PiPPreviewCardView: View {
                                     ProgressView()
                                         .scaleEffect(0.6)
                                 } else {
-                                    Text("⚡")
+                                    Image(systemName: "bolt.fill")
+                                        .font(.system(size: 10, weight: .bold))
                                 }
                                 Text("讀截圖")
                             }

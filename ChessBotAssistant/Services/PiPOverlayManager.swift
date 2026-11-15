@@ -40,6 +40,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var latestThinkRange: String = ""
     private var latestHangingCount: Int = 0
     private var latestBoardTheme: BoardTheme = .glacierBlue
+    private var latestIsKingInCheck: Bool = false
+    private var latestPinnedCount: Int = 0
+    private var latestIsWaitingForOpponentReply: Bool = false
     private var contentRevision: UInt64 = 0
     private var renderedRevision: UInt64 = 0
     private var cachedPixelBuffer: CVPixelBuffer?
@@ -111,7 +114,10 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         openingName: String = "",
         thinkRange: String = "",
         hangingCount: Int = 0,
-        boardTheme: BoardTheme = .glacierBlue
+        boardTheme: BoardTheme = .glacierBlue,
+        isKingInCheck: Bool = false,
+        pinnedCount: Int = 0,
+        isWaitingForOpponentReply: Bool = false
     ) {
         self.latestBoard = board
         self.latestAnalysis = analysis
@@ -127,6 +133,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         self.latestThinkRange = thinkRange
         self.latestHangingCount = hangingCount
         self.latestBoardTheme = boardTheme
+        self.latestIsKingInCheck = isKingInCheck
+        self.latestPinnedCount = pinnedCount
+        self.latestIsWaitingForOpponentReply = isWaitingForOpponentReply
         contentRevision &+= 1
         pushCurrentFrame(forceRedraw: true)
     }
@@ -425,7 +434,7 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             let bestFromHighlight = UIColor(red: 0.97, green: 0.92, blue: 0.36, alpha: 0.48)
             let bestToHighlight = UIColor(red: 0.35, green: 0.88, blue: 0.45, alpha: 0.45)
 
-            let bestMove = (!latestIsSafetyLocked && latestAutoHint) ? latestAnalysis?.primaryLine?.bestMove : nil
+            let bestMove = (!latestIsSafetyLocked && !latestIsWaitingForOpponentReply && latestAutoHint) ? latestAnalysis?.primaryLine?.bestMove : nil
 
             for screenRow in 0..<8 {
                 for screenCol in 0..<8 {
@@ -453,13 +462,18 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                     }
 
                     if let piece = latestBoard.squares[boardRow][boardCol] {
+                        if latestIsKingInCheck && piece.type == .king && piece.color == latestPerspective {
+                            UIColor(red: 0.92, green: 0.22, blue: 0.24, alpha: 0.60).setFill()
+                            cg.fill(sqRect)
+                        }
                         drawPieceGlyph(piece, in: sqRect)
                     }
                 }
             }
 
-            // 3. Multi-PV Arrows on Mini Board (suppressed when safety locked or in coach piece-only mode)
-            if !latestIsSafetyLocked && !latestCoachPieceOnlyMode && latestAutoHint, let lines = latestAnalysis?.lines {
+            // 3. Multi-PV Arrows on Mini Board (suppressed when safety locked, waiting for opponent, or coach piece-only mode)
+            if !latestIsSafetyLocked && !latestIsWaitingForOpponentReply && !latestCoachPieceOnlyMode && latestAutoHint,
+               let lines = latestAnalysis?.lines {
                 let arrowColors: [UIColor] = [
                     UIColor(red: 0.25, green: 0.88, blue: 0.48, alpha: 0.92),
                     UIColor(red: 0.22, green: 0.78, blue: 0.96, alpha: 0.78),
@@ -509,17 +523,40 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                 border.stroke()
 
                 let titleAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 18, weight: .heavy),
+                    .font: UIFont.systemFont(ofSize: 17, weight: .heavy),
                     .foregroundColor: UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
                 ]
-                NSString(string: "⚠️ 疑似真人計時賽").draw(in: CGRect(x: panelX + 12, y: 52, width: panelW - 24, height: 32), withAttributes: titleAttr)
+                NSString(string: "[安全鎖定] 疑似計時對局").draw(in: CGRect(x: panelX + 12, y: 52, width: panelW - 24, height: 32), withAttributes: titleAttr)
 
                 let bodyAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 14, weight: .semibold),
+                    .font: UIFont.systemFont(ofSize: 13.5, weight: .semibold),
                     .foregroundColor: UIColor.white
                 ]
-                NSString(string: "已自動鎖定提示防誤封\n\n偵測到倒數計時器且無 Bot 標記。\n\n若確定為電腦練習，請回主視窗點擊「確認為 Bot 對局並解鎖」。").draw(
+                NSString(string: "已自動隱藏提示防止誤封\n\n偵測到倒數計時器且無 Bot 標記。\n\n若確定為電腦練習，請回主畫面點擊「確認為 Bot 對局並解鎖」。").draw(
                     in: CGRect(x: panelX + 12, y: 96, width: panelW - 24, height: 280),
+                    withAttributes: bodyAttr
+                )
+            } else if latestIsWaitingForOpponentReply {
+                let waitBox = CGRect(x: panelX, y: 30, width: panelW, height: 380)
+                UIColor(red: 0.12, green: 0.16, blue: 0.22, alpha: 1.0).setFill()
+                UIBezierPath(roundedRect: waitBox, cornerRadius: 12).fill()
+                UIColor(red: 0.28, green: 0.72, blue: 0.92, alpha: 0.55).setStroke()
+                let border = UIBezierPath(roundedRect: waitBox, cornerRadius: 12)
+                border.lineWidth = 1.5
+                border.stroke()
+
+                let titleAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 16, weight: .heavy),
+                    .foregroundColor: UIColor(red: 0.36, green: 0.84, blue: 0.98, alpha: 1.0)
+                ]
+                NSString(string: "[回合穩定] 等待對手落子").draw(in: CGRect(x: panelX + 12, y: 56, width: panelW - 24, height: 28), withAttributes: titleAttr)
+
+                let bodyAttr: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 13, weight: .medium),
+                    .foregroundColor: UIColor(white: 0.84, alpha: 1.0)
+                ]
+                NSString(string: "已偵測我方落子。\n\n為避免跳幀誤判路徑，系統將在對手回子穩定後立即計算最佳反擊。").draw(
+                    in: CGRect(x: panelX + 12, y: 98, width: panelW - 24, height: 220),
                     withAttributes: bodyAttr
                 )
             } else {
@@ -530,41 +567,50 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
 
                 let primary = latestAnalysis?.primaryLine
                 let evalStr = primary?.formattedScore ?? "0.00"
-                let winPct = Int((primary?.winProbability(for: latestPerspective) ?? 50.0).rounded())
+                let wdl = primary?.wdlBreakdown(for: latestPerspective) ?? (win: 38, draw: 24, loss: 38)
                 let depthText = latestAnalysis.map { "D\($0.depthReached)" } ?? "..."
                 let campShort = latestPerspective == .white ? "白" : "黑"
 
                 let headerAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 13.5, weight: .bold),
+                    .font: UIFont.systemFont(ofSize: 12.5, weight: .bold),
                     .foregroundColor: UIColor(red: 0.52, green: 0.88, blue: 0.48, alpha: 1.0)
                 ]
-                NSString(string: "我執\(campShort) • \(depthText) • 勝率\(winPct)%").draw(
-                    in: badgeRect.insetBy(dx: 10, dy: 6),
+                NSString(string: "執\(campShort) · \(depthText) · 勝\(wdl.win) 和\(wdl.draw) 負\(wdl.loss)%").draw(
+                    in: badgeRect.insetBy(dx: 8, dy: 7),
                     withAttributes: headerAttr
                 )
 
                 // Eval score row
                 let evalAttr: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.monospacedDigitSystemFont(ofSize: 28, weight: .heavy),
+                    .font: UIFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy),
                     .foregroundColor: UIColor.white
                 ]
                 NSString(string: evalStr).draw(at: CGPoint(x: panelX, y: 68), withAttributes: evalAttr)
 
-                let statusRightText = latestHangingCount > 0
-                    ? "⚠️懸子×\(latestHangingCount)"
-                    : (latestThinkRange.isEmpty ? "" : "⏱\(latestThinkRange)")
+                let statusRightText: String
+                if latestIsKingInCheck {
+                    statusRightText = "[被將軍] 解將"
+                } else if latestPinnedCount > 0 {
+                    statusRightText = "[護王牽制×\(latestPinnedCount)]"
+                } else if latestHangingCount > 0 {
+                    statusRightText = "[懸子×\(latestHangingCount)]"
+                } else if !latestThinkRange.isEmpty {
+                    statusRightText = "節奏 \(latestThinkRange)"
+                } else {
+                    statusRightText = ""
+                }
                 if !statusRightText.isEmpty {
                     let rightStyle = NSMutableParagraphStyle()
                     rightStyle.alignment = .right
                     let rightAttr: [NSAttributedString.Key: Any] = [
-                        .font: UIFont.systemFont(ofSize: 12.5, weight: .bold),
-                        .foregroundColor: latestHangingCount > 0
+                        .font: UIFont.systemFont(ofSize: 12, weight: .bold),
+                        .foregroundColor: (latestIsKingInCheck || latestHangingCount > 0 || latestPinnedCount > 0)
                             ? UIColor(red: 1.0, green: 0.48, blue: 0.48, alpha: 1.0)
                             : UIColor(red: 0.98, green: 0.82, blue: 0.36, alpha: 1.0),
                         .paragraphStyle: rightStyle
                     ]
                     NSString(string: statusRightText).draw(
-                        in: CGRect(x: panelX + 95, y: 76, width: panelW - 95, height: 22),
+                        in: CGRect(x: panelX + 90, y: 76, width: panelW - 90, height: 22),
                         withAttributes: rightAttr
                     )
                 }
@@ -601,8 +647,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                             .font: UIFont.systemFont(ofSize: 11.5, weight: .bold),
                             .foregroundColor: UIColor(red: 1.0, green: 0.52, blue: 0.55, alpha: 1.0)
                         ]
-                        NSString(string: "🔮敵:\(reply.san)").draw(
-                            at: CGPoint(x: panelX + 112, y: cardY + 7),
+                        NSString(string: "[敵應] \(reply.san)").draw(
+                            at: CGPoint(x: panelX + 106, y: cardY + 7),
                             withAttributes: replyAttr
                         )
                     }
@@ -645,11 +691,14 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                             withAttributes: coordAttr
                         )
 
+                        let subDetail = idx == 0 && !line.tacticalReason.isEmpty
+                            ? line.tacticalReason
+                            : line.continuationPreview
                         let pvAttr: [NSAttributedString.Key: Any] = [
-                            .font: UIFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
-                            .foregroundColor: UIColor(white: 0.66, alpha: 1.0)
+                            .font: UIFont.systemFont(ofSize: 11, weight: .regular),
+                            .foregroundColor: UIColor(white: 0.70, alpha: 1.0)
                         ]
-                        NSString(string: line.continuationPreview).draw(
+                        NSString(string: subDetail).draw(
                             in: CGRect(x: panelX + 14, y: cardY + 58, width: panelW - 22, height: 18),
                             withAttributes: pvAttr
                         )
@@ -658,15 +707,22 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             }
 
             // Footer
-            let netLabel = latestZeroNetworkMode ? "🔒離線" : "🛡️保護"
-            let syncLabel = latestAutoSyncActive ? "📸同步" : "⏸手動"
-            let extraLabel = latestHangingCount > 0
-                ? "⚠️懸子\(latestHangingCount)"
-                : (latestThinkRange.isEmpty ? "" : "⏱\(latestThinkRange)")
+            let netLabel = latestZeroNetworkMode ? "[離線]" : "[防護]"
+            let syncLabel = latestAutoSyncActive ? "[同步]" : "[手動]"
+            let extraLabel: String
+            if latestIsKingInCheck {
+                extraLabel = "[被將軍]"
+            } else if latestHangingCount > 0 {
+                extraLabel = "[懸子\(latestHangingCount)]"
+            } else if !latestThinkRange.isEmpty {
+                extraLabel = "節奏\(latestThinkRange)"
+            } else {
+                extraLabel = ""
+            }
             let footerText = extraLabel.isEmpty ? "\(netLabel) • \(syncLabel)" : "\(netLabel) • \(syncLabel) • \(extraLabel)"
             let footerAttr: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 11.5, weight: .semibold),
-                .foregroundColor: latestIsSafetyLocked || latestHangingCount > 0
+                .font: UIFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: latestIsSafetyLocked || latestHangingCount > 0 || latestIsKingInCheck
                     ? UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
                     : (latestAutoSyncActive
                         ? UIColor(red: 0.45, green: 0.90, blue: 0.58, alpha: 1.0)
@@ -675,7 +731,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             NSString(string: footerText).draw(at: CGPoint(x: panelX, y: 422), withAttributes: footerAttr)
 
             // Bottom status strip / PiP button legend / opening name
-            let openingBadge = latestOpeningName.isEmpty ? "⏯掃描 • ⏩走步 • ⏪悔步" : "📖 \(latestOpeningName) • ⏯掃描 ⏩走步"
+            let openingBadge = latestOpeningName.isEmpty
+                ? "[播放:掃描 | 快轉:走步 | 倒轉:悔步]"
+                : "\(latestOpeningName) · 播:掃描 快轉:走步"
             let bottomStatusText = pipBannerText ?? openingBadge
             let statusStripRect = CGRect(x: 48, y: 454, width: 648, height: 22)
             if pipBannerText != nil {

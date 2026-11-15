@@ -70,8 +70,8 @@ struct SystemBroadcastPickerButton: View {
 
                         Text(
                             extensionBundleID == nil
-                                ? "⚠️ 免外掛版不支援螢幕直播（請改用上方懸浮窗 + 截圖識別）"
-                                : (isActive ? "螢幕實時識別運作中 (點此停止或切換)" : "🔴 啟動螢幕實時識別 (免截圖直連 Chess.com)")
+                                ? "免外掛版不支援螢幕直播（請改用懸浮窗 + 截圖識別）"
+                                : (isActive ? "螢幕實時識別運作中 (點此停止或切換)" : "啟動螢幕實時識別 (免截圖直連 Chess.com)")
                         )
                         .font(.caption.bold())
                         .foregroundColor(.white)

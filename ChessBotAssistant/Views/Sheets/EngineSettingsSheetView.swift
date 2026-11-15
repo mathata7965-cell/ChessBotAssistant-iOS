@@ -13,33 +13,50 @@ struct EngineSettingsSheetView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("🛡️ 防誤封與隱私安全防護") {
-                    Toggle("🔒 100% 純本機零連網隔離模式", isOn: $engineService.zeroNetworkIsolationMode)
-                        .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
+                Section {
+                    Toggle(isOn: $engineService.zeroNetworkIsolationMode) {
+                        Label("100% 純本機零連網隔離模式", systemImage: "lock.shield.fill")
+                    }
+                    .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
 
                     Text("開啟時所有分析皆於本機完成，不發送任何棋局至外部伺服器（無網路請求足跡）。")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
-                    Toggle("🛡️ 偵測到真人計時局自動鎖定提示", isOn: $engineService.humanMatchSafetyLockEnabled)
-                        .tint(.cyan)
+                    Toggle(isOn: $engineService.humanMatchSafetyLockEnabled) {
+                        Label("偵測到真人計時局自動鎖定提示", systemImage: "checkmark.shield.fill")
+                    }
+                    .tint(.cyan)
 
                     Text("辨識截圖時若發現倒數計時器且無 Bot/電腦標記，自動隱藏箭頭與走法防止誤封。")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
-                    Toggle("🎓 教練半提示模式（僅高亮起點格、不畫終點箭頭）", isOn: $engineService.coachPieceOnlyHintMode)
-                        .tint(.orange)
+                    Toggle(isOn: $engineService.coachPieceOnlyHintMode) {
+                        Label("教練半提示模式（僅高亮起點格）", systemImage: "graduationcap.fill")
+                    }
+                    .tint(.orange)
+
+                    Picker("擬人實力目標 (自然防封)", selection: $engineService.humanTargetElo) {
+                        Text("1200 (休閒娛樂)").tag(1200)
+                        Text("1500 (中階玩家)").tag(1500)
+                        Text("1650 (自然均衡)").tag(1650)
+                        Text("1900 (俱樂部高手)").tag(1900)
+                        Text("2200 (準大師水準)").tag(2200)
+                        Text("最強引擎不讓分").tag(0)
+                    }
 
                     Button(role: .destructive) {
                         viewModel.deleteLastScreenshot()
                     } label: {
-                        Label("🧹 刪除最近一張辨識截圖", systemImage: "trash")
+                        Label("刪除最近一張辨識截圖", systemImage: "trash")
                     }
                     .disabled(!viewModel.screenshotMonitor.hasDeletableScreenshot)
+                } header: {
+                    Label("防誤封與隱私安全防護", systemImage: "shield.lefthalf.filled")
                 }
 
-                Section("🧭 陣營判斷、風格與進階戰術設定") {
+                Section {
                     Picker("我方陣營偵測", selection: Binding(
                         get: { viewModel.campDetectionMode },
                         set: { newMode in
@@ -89,11 +106,17 @@ struct EngineSettingsSheetView: View {
                         }
                     }
 
-                    Toggle("🔮 顯示對手回應預測箭頭（紅色虛線）", isOn: $engineService.showOpponentReplyArrow)
-                        .tint(.red)
+                    Toggle(isOn: $engineService.showOpponentReplyArrow) {
+                        Label("顯示對手回應預測箭頭（紅色虛線）", systemImage: "arrow.uturn.down.circle.fill")
+                    }
+                    .tint(.red)
 
-                    Toggle("🔊 掃描後中文語音播報最佳步", isOn: $viewModel.voiceAnnounceEnabled)
-                        .tint(.cyan)
+                    Toggle(isOn: $viewModel.voiceAnnounceEnabled) {
+                        Label("掃描後中文語音播報最佳步", systemImage: "speaker.wave.2.fill")
+                    }
+                    .tint(.cyan)
+                } header: {
+                    Label("陣營判斷、風格與進階戰術設定", systemImage: "safari.fill")
                 }
 
                 Section("引擎思考設定") {
@@ -151,7 +174,7 @@ struct EngineSettingsSheetView: View {
                     .padding(.vertical, 4)
                 }
 
-                Section("📦 10MB 離線大師引擎包 & Bot 弱點百科") {
+                Section {
                     let pack = OfflineEnginePack.shared
                     HStack {
                         Text("離線引擎包狀態")
@@ -189,6 +212,8 @@ struct EngineSettingsSheetView: View {
                         }
                         .padding(.vertical, 2)
                     }
+                } header: {
+                    Label("10MB 離線大師引擎包 & Bot 弱點百科", systemImage: "shippingbox.fill")
                 }
 
                 Section("當前 FEN 資訊") {

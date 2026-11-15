@@ -36,6 +36,44 @@ final class AssistantViewModel: ObservableObject {
     @Published var lastMoveQualityBadge: String? = nil
     @Published var boardTheme: BoardTheme = .glacierBlue
     @Published var moveAccuracyScores: [Double] = []
+    @Published var isWaitingForOpponentReply: Bool = false
+    @Published var paceRecommendedSeconds: Int = 3
+    @Published var paceElapsedSeconds: Int = 0
+
+    var paceRemainingSeconds: Int {
+        max(0, paceRecommendedSeconds - paceElapsedSeconds)
+    }
+
+    var stealthSafetyScore: Int {
+        var score = 76
+        if engineService.humanMatchSafetyLockEnabled { score += 7 }
+        if engineService.zeroNetworkIsolationMode { score += 6 }
+        if engineService.playStyleMode == .humanSafe {
+            score += 5
+        } else if engineService.playStyleMode == .defensive {
+            score += 2
+        }
+        if engineService.coachPieceOnlyHintMode { score += 3 }
+        if alwaysAnalyzeMyCampTurn { score += 2 }
+        return min(99, max(75, score))
+    }
+
+    var stealthProtectionBadges: [String] {
+        var tags: [String] = []
+        if engineService.humanMatchSafetyLockEnabled { tags.append("計時賽保護") }
+        if engineService.zeroNetworkIsolationMode { tags.append("零連網隔離") }
+        if engineService.playStyleMode == .humanSafe {
+            let eloText = engineService.humanTargetElo > 0 ? "\(engineService.humanTargetElo)" : "自然"
+            tags.append("擬人\(eloText)")
+        }
+        if engineService.coachPieceOnlyHintMode { tags.append("半提示") }
+        if paceRemainingSeconds > 0 {
+            tags.append("建議停頓 \(paceRemainingSeconds)s")
+        } else {
+            tags.append("節奏就緒")
+        }
+        return tags
+    }
 
     var sessionAccuracyText: String {
         guard !moveAccuracyScores.isEmpty else {
@@ -62,6 +100,9 @@ final class AssistantViewModel: ObservableObject {
     private var lastSpokenFEN: String?
     private var lastEvaluatedFEN: String?
     private var previousCampWinPct: Double?
+    private var pendingBroadcastKey: String?
+    private var pendingBroadcastCount: Int = 0
+    private var paceTimer: Timer?
 
     init() {
         setupBindings()
@@ -129,6 +170,17 @@ final class AssistantViewModel: ObservableObject {
             .store(in: &cancellables)
 
         engineService.$botTargetProfile
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if !self.engineService.reapplyPlayStyle(for: self.boardState) {
+                    self.triggerAnalysis()
+                }
+            }
+            .store(in: &cancellables)
+
+        engineService.$humanTargetElo
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -245,13 +297,83 @@ final class AssistantViewModel: ObservableObject {
             openingName: radar.openingName,
             thinkRange: radar.recommendedThinkRange,
             hangingCount: radar.hangingFriendlySquares.count,
-            boardTheme: boardTheme
+            boardTheme: boardTheme,
+            isKingInCheck: radar.isKingInCheck,
+            pinnedCount: radar.pinnedPieces.count,
+            isWaitingForOpponentReply: isWaitingForOpponentReply
         )
     }
 
-    func triggerAnalysis() {
+    func triggerAnalysis(preserveExcludedMoves: Bool = false) {
+        isWaitingForOpponentReply = false
         syncPiPContent()
-        engineService.analyze(board: boardState)
+        startPaceCountdown()
+        engineService.analyze(board: boardState, preserveExcludedMoves: preserveExcludedMoves)
+    }
+
+    func forceAnalyzeNow() {
+        isWaitingForOpponentReply = false
+        triggerAnalysis()
+    }
+
+    func skipBlockedMoveAndReanalyze() {
+        guard let bestMove = engineService.currentAnalysis?.primaryLine?.bestMove else {
+            showBanner("目前無可切換的推薦步，已重新計算最佳解")
+            triggerAnalysis()
+            return
+        }
+
+        if bestMove.isCastling {
+            if perspective == .white {
+                boardState.castlingRights.whiteKingside = false
+                boardState.castlingRights.whiteQueenside = false
+            } else {
+                boardState.castlingRights.blackKingside = false
+                boardState.castlingRights.blackQueenside = false
+            }
+            engineService.excludedUCIMoves.insert(bestMove.uci)
+            showBanner("已排除易位，改推薦可直接走動的安全步")
+            triggerAnalysis(preserveExcludedMoves: true)
+            return
+        }
+
+        engineService.excludedUCIMoves.insert(bestMove.uci)
+        showBanner("已跳過受阻步 \(bestMove.san)，切換至最佳備選步")
+        triggerAnalysis(preserveExcludedMoves: true)
+    }
+
+    private func startPaceCountdown() {
+        paceTimer?.invalidate()
+        let isTense = tacticalRadar.isKingInCheck || tacticalRadar.hangingFriendlySquares.count >= 2
+        let pieceCount = boardState.squares.flatMap { $0 }.compactMap { $0 }.count
+        if isTense {
+            paceRecommendedSeconds = 5
+        } else if pieceCount <= 10 {
+            paceRecommendedSeconds = 4
+        } else {
+            paceRecommendedSeconds = 3
+        }
+        paceElapsedSeconds = 0
+
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] t in
+            guard let self else {
+                t.invalidate()
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.paceElapsedSeconds < self.paceRecommendedSeconds {
+                    self.paceElapsedSeconds += 1
+                } else {
+                    t.invalidate()
+                    if self.paceTimer === t {
+                        self.paceTimer = nil
+                    }
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        paceTimer = timer
     }
 
     // MARK: - Board Interaction
@@ -349,6 +471,8 @@ final class AssistantViewModel: ObservableObject {
         lastEvaluatedFEN = nil
         previousCampWinPct = nil
         lastSpokenFEN = nil
+        pendingBroadcastKey = nil
+        pendingBroadcastCount = 0
         clearSelection()
         showBanner("已重置為標準開局")
         triggerAnalysis()
@@ -479,7 +603,7 @@ final class AssistantViewModel: ObservableObject {
         \(moveText)
         """
         UIPasteboard.general.string = report
-        showBanner("📊 已複製 PGN 與對局複盤報告至剪貼簿")
+        showBanner("[已複製] PGN 與對局複盤報告已存至剪貼簿")
     }
 
     private func recordAnalysisTelemetry(_ analysis: EngineAnalysisResult) {
@@ -497,15 +621,15 @@ final class AssistantViewModel: ObservableObject {
             let moveAcc = max(0.0, min(100.0, 100.0 + min(0.0, delta * 2.2)))
             moveAccuracyScores.append(moveAcc)
             if delta >= 3.0 {
-                lastMoveQualityBadge = "💎 妙手 (+\(Int(delta.rounded()))%)"
+                lastMoveQualityBadge = "[妙手] +\(Int(delta.rounded()))%"
             } else if delta >= -1.5 {
-                lastMoveQualityBadge = "✅ 最佳"
+                lastMoveQualityBadge = "[最佳]"
             } else if delta >= -5.0 {
-                lastMoveQualityBadge = "👍 不錯"
+                lastMoveQualityBadge = "[良好]"
             } else if delta >= -12.0 {
-                lastMoveQualityBadge = "⚠️ 不精確 (\(Int(delta.rounded()))%)"
+                lastMoveQualityBadge = "[偏差] \(Int(delta.rounded()))%"
             } else {
-                lastMoveQualityBadge = "❌ 失誤 (\(Int(delta.rounded()))%)"
+                lastMoveQualityBadge = "[失誤] \(Int(delta.rounded()))%"
             }
         }
         previousCampWinPct = currentCampPct
@@ -673,36 +797,82 @@ final class AssistantViewModel: ObservableObject {
 
         if !hasShownBroadcastSyncBanner {
             hasShownBroadcastSyncBanner = true
-            pipManager.showPiPBanner("✅ 實時畫面同步中")
+            pipManager.showPiPBanner("[實時] 畫面同步運作中")
         }
 
-        guard boardChanged || perspChanged else { return }
+        guard boardChanged || perspChanged else {
+            pendingBroadcastKey = nil
+            pendingBroadcastCount = 0
+            return
+        }
 
-        if boardChanged {
+        // 2-frame gate for abrupt non-delta transitions to prevent mid-animation flickering
+        if adjustedBoard.squares != boardState.squares {
+            let placementKey = String(parsedBoard.toFEN().split(separator: " ").first ?? "")
+            let isVerifiedStep = payload.notes.contains("步")
+            if !isVerifiedStep {
+                if pendingBroadcastKey == placementKey {
+                    pendingBroadcastCount += 1
+                } else {
+                    pendingBroadcastKey = placementKey
+                    pendingBroadcastCount = 1
+                }
+                guard pendingBroadcastCount >= 2 else { return }
+            }
+        }
+        pendingBroadcastKey = nil
+        pendingBroadcastCount = 0
+
+        if adjustedBoard.squares != boardState.squares {
+            var ownProbe = boardState
+            ownProbe.sideToMove = newPerspective
+            let matchingOwnMove = ownProbe.legalMoves(includeFormattedSAN: false)
+                .first { ownProbe.applyingRaw($0).squares == parsedBoard.squares }
+
+            var oppProbe = boardState
+            oppProbe.sideToMove = newPerspective.opposite
+            let matchingOppMove = oppProbe.legalMoves(includeFormattedSAN: false)
+                .first { oppProbe.applyingRaw($0).squares == parsedBoard.squares }
+
             history.append(boardState)
             boardState = adjustedBoard
-            lastMove = nil
+            perspective = newPerspective
+            isFairPlaySafetyLocked = false
+            safetyLockReason = nil
             clearSelection()
+
+            if let ownMove = matchingOwnMove, matchingOppMove == nil {
+                lastMove = ownMove
+                isWaitingForOpponentReply = true
+                engineService.cancelAnalysis()
+                syncPiPContent()
+                return
+            } else {
+                lastMove = matchingOppMove
+                isWaitingForOpponentReply = false
+            }
+        } else {
+            perspective = newPerspective
+            isFairPlaySafetyLocked = false
+            safetyLockReason = nil
+            isWaitingForOpponentReply = false
         }
-        perspective = newPerspective
-        isFairPlaySafetyLocked = false
-        safetyLockReason = nil
         triggerAnalysis()
     }
 
     func forceScanFromPiP() async {
-        pipManager.showPiPBanner("🔄 掃描最新截圖...")
+        pipManager.showPiPBanner("[掃描] 讀取最新截圖...")
         if let image = await screenshotMonitor.forceFetchNewestImageIgnoringCache() {
             let ok = await processScreenshotImage(image, isFromBackgroundMonitor: true)
-            pipManager.showPiPBanner(ok ? "✅ 已同步" : "⚠️ 未偵測到棋盤")
+            pipManager.showPiPBanner(ok ? "[成功] 已同步最新局面" : "[警示] 未偵測到棋盤")
             return
         }
         if let clipImg = UIPasteboard.general.image {
             let ok = await processScreenshotImage(clipImg, isFromBackgroundMonitor: true)
-            pipManager.showPiPBanner(ok ? "✅ 已同步剪貼簿" : "⚠️ 無新截圖")
+            pipManager.showPiPBanner(ok ? "[成功] 已同步剪貼簿" : "[警示] 無新截圖")
             return
         }
-        pipManager.showPiPBanner("⚠️ 無新截圖")
+        pipManager.showPiPBanner("[警示] 無新截圖")
     }
 
     func handlePiPSkipForward() async {
@@ -711,27 +881,27 @@ final class AssistantViewModel: ObservableObject {
             screenshotMonitor.checkForRecentScreenshotNow()
             try? await Task.sleep(nanoseconds: 250_000_000)
             if scanCount > beforeCount {
-                pipManager.showPiPBanner("✅ 已掃描最新畫面")
+                pipManager.showPiPBanner("[成功] 已掃描最新畫面")
                 return
             }
         }
 
         guard !isFairPlaySafetyLocked else {
-            pipManager.showPiPBanner("🔒 安全鎖定中")
+            pipManager.showPiPBanner("[安全鎖] 已隱藏提示")
             return
         }
         guard let best = engineService.currentAnalysis?.primaryLine?.bestMove else {
-            pipManager.showPiPBanner("⚠️ 無可用最佳步")
+            pipManager.showPiPBanner("[警示] 無可用最佳步")
             return
         }
         let moveLabel = best.san.isEmpty ? best.coordinateDisplay : best.san
         applyMove(best)
-        pipManager.showPiPBanner("⏩ 已走 \(moveLabel)")
+        pipManager.showPiPBanner("[執行] 已走 \(moveLabel)")
     }
 
     func handlePiPSkipBackward() {
         undoLastMove()
-        pipManager.showPiPBanner("↩️ 已退回一步")
+        pipManager.showPiPBanner("[退回] 已退回一步")
     }
 
     func handleIncomingURL(_ url: URL) {
@@ -751,17 +921,17 @@ final class AssistantViewModel: ObservableObject {
 
             if let latest = await self.screenshotMonitor.forceFetchNewestImageIgnoringCache(),
                await self.processScreenshotImage(latest, isFromBackgroundMonitor: false) {
-                self.pipManager.showPiPBanner("✅ 已由捷徑掃描同步")
+                self.pipManager.showPiPBanner("[成功] 已由捷徑掃描同步")
                 return
             }
 
             if let clipImg = UIPasteboard.general.image,
                await self.processScreenshotImage(clipImg, isFromBackgroundMonitor: false) {
-                self.pipManager.showPiPBanner("✅ 已由剪貼簿掃描")
+                self.pipManager.showPiPBanner("[成功] 已由剪貼簿掃描")
                 return
             }
 
-            self.pipManager.showPiPBanner("⚠️ 無可掃描截圖")
+            self.pipManager.showPiPBanner("[警示] 無可掃描截圖")
             self.showBanner("找不到相簿截圖或剪貼簿圖片")
         }
     }
@@ -847,7 +1017,7 @@ final class AssistantViewModel: ObservableObject {
         Task {
             let deleted = await screenshotMonitor.deleteLastDetectedScreenshot()
             if deleted {
-                showBanner("🧹 已從相簿刪除最近一張暫存截圖")
+                showBanner("已從相簿刪除最近一張暫存截圖")
             } else {
                 showBanner("沒有可刪除的暫存截圖或使用者取消了刪除")
             }
@@ -889,7 +1059,7 @@ final class AssistantViewModel: ObservableObject {
         lastMove = nil
         clearSelection()
         if isFairPlaySafetyLocked {
-            showBanner("⚠️ \(result.detectedMatchContextNote)")
+            showBanner("[安全鎖定] \(result.detectedMatchContextNote)")
         } else {
             showBanner("截圖辨識完成（\(detectedCampReason)）")
         }

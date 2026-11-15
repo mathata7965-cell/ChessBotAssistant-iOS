@@ -12,8 +12,13 @@ struct MultiPVPanelView: View {
     var recommendedThinkRange: String? = nil
     var targetDepth: Int = 12
     var multiPVCount: Int = 3
+    var isWaitingForOpponentReply: Bool = false
+    var paceRemainingSeconds: Int = 0
+    var gamePhasePly: Int = 20
     var onChangeDepth: ((Int) -> Void)? = nil
     var onChangeMultiPV: ((Int) -> Void)? = nil
+    var onSkipBlockedMove: (() -> Void)? = nil
+    var onForceAnalyzeNow: (() -> Void)? = nil
     let onSelectPV: (PVLine) -> Void
     let onPlayPV: (PVLine) -> Void
 
@@ -26,7 +31,7 @@ struct MultiPVPanelView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
             // Header
             HStack(spacing: 8) {
                 HStack(spacing: 5) {
@@ -36,6 +41,7 @@ struct MultiPVPanelView: View {
                     Text(analysis?.engineSource ?? "準備分析中...")
                         .font(.caption.bold())
                         .foregroundColor(.white)
+                        .lineLimit(1)
                 }
 
                 Menu {
@@ -82,7 +88,7 @@ struct MultiPVPanelView: View {
                     }
                 } else if let primary = analysis?.primaryLine {
                     let winPct = Int(primary.winProbability(for: perspective).rounded())
-                    Text("\(perspective.displayName)勝率 \(winPct)%")
+                    Text("\(perspective.displayName)期望 \(winPct)%")
                         .font(.caption.bold())
                         .foregroundColor(winPct >= 50 ? Color(red: 0.45, green: 0.90, blue: 0.52) : Color(red: 0.96, green: 0.55, blue: 0.48))
                 }
@@ -106,112 +112,52 @@ struct MultiPVPanelView: View {
                 .padding(12)
                 .background(Color.red.opacity(0.16))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
-            } else if let lines = analysis?.lines, !lines.isEmpty {
-                VStack(spacing: 7) {
-                    ForEach(lines) { line in
-                        let accent = rankAccentColor(line.multipvIndex)
-                        let isHighlighted = selectedPVIndex == line.multipvIndex
-
-                        HStack(spacing: 10) {
-                            // Rank strip
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(accent)
-                                .frame(width: 4)
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text("#\(line.multipvIndex)")
-                                        .font(.system(size: 12, weight: .heavy, design: .rounded))
-                                        .foregroundColor(accent)
-
-                                    if coachPieceOnlyMode {
-                                        let pieceName = boardState?.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
-                                        Text("動\(pieceName) (\(line.bestMove.from.algebraic))")
-                                            .font(.system(size: 14.5, weight: .heavy))
-                                            .foregroundColor(.white)
-                                    } else {
-                                        Text(line.bestMove.san)
-                                            .font(.system(size: 16, weight: .heavy, design: .monospaced))
-                                            .foregroundColor(.white)
-
-                                        Text(line.bestMove.coordinateDisplay)
-                                            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                                            .foregroundColor(Color(white: 0.72))
-
-                                        if line.multipvIndex == 1 && showOpponentReplyArrow,
-                                           let reply = line.predictedOpponentReply {
-                                            Text("🔮敵:\(reply.san)")
-                                                .font(.system(size: 10.5, weight: .bold))
-                                                .foregroundColor(Color(red: 1.0, green: 0.56, blue: 0.58))
-                                                .lineLimit(1)
-                                        }
-                                    }
-
-                                    Spacer()
-
-                                    Text(line.formattedScore)
-                                        .font(.system(size: 12.5, weight: .heavy, design: .monospaced))
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 2.5)
-                                        .background(
-                                            line.scoreCentipawns >= 0
-                                                ? Color.white.opacity(0.92)
-                                                : Color(white: 0.22)
-                                        )
-                                        .foregroundColor(
-                                            line.scoreCentipawns >= 0
-                                                ? Color(red: 0.10, green: 0.12, blue: 0.14)
-                                                : .white
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                                    if !coachPieceOnlyMode {
-                                        Button {
-                                            onPlayPV(line)
-                                        } label: {
-                                            Text("走這步")
-                                                .font(.system(size: 11.5, weight: .bold))
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 4)
-                                                .background(accent.opacity(0.22))
-                                                .foregroundColor(accent)
-                                                .clipShape(RoundedRectangle(cornerRadius: 7))
-                                        }
-                                    }
-                                }
-
-                                HStack(spacing: 6) {
-                                    Text(coachPieceOnlyMode ? "教練半提示模式：隱藏終點與續著" : line.continuationPreview)
-                                        .font(.system(size: 11, weight: .regular, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.65))
-                                        .lineLimit(1)
-
-                                    Spacer(minLength: 0)
-
-                                    if line.multipvIndex == 1 && !coachPieceOnlyMode,
-                                       let thinkRange = recommendedThinkRange, !thinkRange.isEmpty {
-                                        Text("⏱\(thinkRange)")
-                                            .font(.system(size: 10.5, weight: .semibold))
-                                            .foregroundColor(Color(red: 0.98, green: 0.80, blue: 0.35))
-                                            .lineLimit(1)
-                                    }
-                                }
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                onSelectPV(line)
-                            }
+            } else if isWaitingForOpponentReply {
+                HStack(spacing: 10) {
+                    Image(systemName: "hourglass.circle.fill")
+                        .font(.title3)
+                        .foregroundColor(.cyan)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("已偵測我方落子 · 等待對手落子中")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.white)
+                        Text("畫面穩定鎖定中，對手走棋後會立即更新最佳路徑，避免跳幀誤判。")
+                            .font(.caption2)
+                            .foregroundColor(Color(white: 0.72))
+                    }
+                    Spacer()
+                    if let onForceAnalyzeNow {
+                        Button {
+                            onForceAnalyzeNow()
+                        } label: {
+                            Text("立即分析")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.cyan.opacity(0.22))
+                                .foregroundColor(.cyan)
+                                .clipShape(Capsule())
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(isHighlighted ? Color.white.opacity(0.10) : Color(red: 0.14, green: 0.16, blue: 0.19))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(isHighlighted ? accent.opacity(0.75) : Color.white.opacity(0.06), lineWidth: 1)
-                        )
+                    }
+                }
+                .padding(12)
+                .background(Color.cyan.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.cyan.opacity(0.42), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else if let lines = analysis?.lines, let primary = lines.first {
+                // Primary Tactical Hint Command Card (#1)
+                primaryCommandCard(line: primary)
+
+                // Alternative Candidates (#2, #3)
+                let secondaryLines = Array(lines.dropFirst())
+                if !secondaryLines.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(secondaryLines) { line in
+                            secondaryLineRow(line: line)
+                        }
                     }
                 }
             } else {
@@ -230,6 +176,261 @@ struct MultiPVPanelView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func primaryCommandCard(line: PVLine) -> some View {
+        let accent = rankAccentColor(1)
+        let isHighlighted = selectedPVIndex == line.multipvIndex
+        let movingPiece = boardState?.piece(at: line.bestMove.from)
+        let pieceLabel = movingPiece?.type.fullChineseName ?? "棋子"
+        let symbolName = movingPiece?.type.sfSymbolName ?? "arrow.right.circle.fill"
+        let wdl = line.wdlBreakdown(for: perspective, gamePhasePly: gamePhasePly)
+        let reasonText = line.tacticalReason.isEmpty
+            ? (boardState?.explainMoveTactics(line.bestMove) ?? "推薦主線")
+            : line.tacticalReason
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(accent)
+                    .padding(6)
+                    .background(accent.opacity(0.18))
+                    .clipShape(Circle())
+
+                if coachPieceOnlyMode {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("動 \(pieceLabel) (\(line.bestMove.from.algebraic))")
+                            .font(.system(size: 16, weight: .heavy))
+                            .foregroundColor(.white)
+                        Text("教練半提示模式：隱藏具體終點與續著")
+                            .font(.caption2)
+                            .foregroundColor(Color(white: 0.68))
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(pieceLabel)
+                                .font(.caption.bold())
+                                .foregroundColor(accent)
+                            Text(line.bestMove.coordinateDisplay)
+                                .font(.system(size: 15, weight: .heavy, design: .monospaced))
+                                .foregroundColor(.white)
+                            Text("[\(line.bestMove.san)]")
+                                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                .foregroundColor(Color(white: 0.78))
+                        }
+
+                        Text(reasonText)
+                            .font(.caption2.bold())
+                            .foregroundColor(Color(red: 0.78, green: 0.92, blue: 0.80))
+                            .lineLimit(2)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                Text(line.formattedScore)
+                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        line.scoreCentipawns >= 0
+                            ? Color.white.opacity(0.92)
+                            : Color(white: 0.22)
+                    )
+                    .foregroundColor(
+                        line.scoreCentipawns >= 0
+                            ? Color(red: 0.10, green: 0.12, blue: 0.14)
+                            : .white
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            // Phase-calibrated WDL Bar (Win / Draw / Loss)
+            VStack(spacing: 4) {
+                GeometryReader { geo in
+                    let totalW = max(1, geo.size.width)
+                    let winW = totalW * CGFloat(wdl.win) / 100.0
+                    let drawW = totalW * CGFloat(wdl.draw) / 100.0
+                    let lossW = max(0, totalW - winW - drawW)
+                    HStack(spacing: 1) {
+                        Rectangle()
+                            .fill(Color(red: 0.35, green: 0.85, blue: 0.45))
+                            .frame(width: winW)
+                        Rectangle()
+                            .fill(Color(white: 0.45))
+                            .frame(width: drawW)
+                        Rectangle()
+                            .fill(Color(red: 0.90, green: 0.36, blue: 0.38))
+                            .frame(width: lossW)
+                    }
+                    .clipShape(Capsule())
+                }
+                .frame(height: 5)
+
+                HStack(spacing: 8) {
+                    Text("勝 \(wdl.win)%")
+                        .foregroundColor(Color(red: 0.45, green: 0.90, blue: 0.52))
+                    Text("和 \(wdl.draw)%")
+                        .foregroundColor(Color(white: 0.68))
+                    Text("負 \(wdl.loss)%")
+                        .foregroundColor(Color(red: 0.96, green: 0.52, blue: 0.50))
+
+                    Spacer()
+
+                    if !coachPieceOnlyMode && showOpponentReplyArrow,
+                       let reply = line.predictedOpponentReply {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.uturn.down.circle.fill")
+                                .font(.system(size: 10))
+                            Text("預計敵應 \(reply.san)")
+                        }
+                        .foregroundColor(Color(red: 1.0, green: 0.58, blue: 0.58))
+                    }
+                }
+                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+            }
+
+            if !coachPieceOnlyMode {
+                HStack(spacing: 6) {
+                    Text(line.continuationPreview)
+                        .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                        .foregroundColor(Color(white: 0.62))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    HStack(spacing: 3) {
+                        Image(systemName: paceRemainingSeconds > 0 ? "hourglass" : "checkmark.circle.fill")
+                            .font(.system(size: 9.5))
+                        Text(paceRemainingSeconds > 0 ? "防封停頓 \(paceRemainingSeconds)s" : (recommendedThinkRange ?? "節奏就緒"))
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(paceRemainingSeconds > 0 ? Color(red: 0.98, green: 0.80, blue: 0.35) : .cyan)
+
+                    if let onSkipBlockedMove {
+                        Button {
+                            onSkipBlockedMove()
+                        } label: {
+                            Label("王受阻/換步", systemImage: "arrow.triangle.branch")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.orange.opacity(0.20))
+                                .foregroundColor(.orange)
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                        }
+                    }
+
+                    Button {
+                        onPlayPV(line)
+                    } label: {
+                        Text("走這步")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(accent.opacity(0.24))
+                            .foregroundColor(accent)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHighlighted ? Color(red: 0.14, green: 0.20, blue: 0.17) : Color(red: 0.13, green: 0.17, blue: 0.19))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isHighlighted ? accent.opacity(0.80) : accent.opacity(0.35), lineWidth: 1.2)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onSelectPV(line)
+        }
+    }
+
+    @ViewBuilder
+    private func secondaryLineRow(line: PVLine) -> some View {
+        let accent = rankAccentColor(line.multipvIndex)
+        let isHighlighted = selectedPVIndex == line.multipvIndex
+
+        HStack(spacing: 9) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(accent)
+                .frame(width: 4)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("#\(line.multipvIndex)")
+                        .font(.system(size: 11.5, weight: .heavy, design: .rounded))
+                        .foregroundColor(accent)
+
+                    if coachPieceOnlyMode {
+                        let pieceName = boardState?.piece(at: line.bestMove.from)?.type.displayName ?? "棋子"
+                        Text("動\(pieceName) (\(line.bestMove.from.algebraic))")
+                            .font(.system(size: 13.5, weight: .bold))
+                            .foregroundColor(.white)
+                    } else {
+                        Text(line.bestMove.san)
+                            .font(.system(size: 14.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(.white)
+
+                        Text(line.bestMove.coordinateDisplay)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color(white: 0.72))
+
+                        if !line.tacticalReason.isEmpty {
+                            Text("· \(line.tacticalReason)")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundColor(Color(white: 0.68))
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer()
+
+                    Text(line.formattedScore)
+                        .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.90))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                    if !coachPieceOnlyMode {
+                        Button {
+                            onPlayPV(line)
+                        } label: {
+                            Text("走這步")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3.5)
+                                .background(accent.opacity(0.20))
+                                .foregroundColor(accent)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onSelectPV(line)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isHighlighted ? Color.white.opacity(0.10) : Color(red: 0.14, green: 0.16, blue: 0.19))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isHighlighted ? accent.opacity(0.75) : Color.white.opacity(0.06), lineWidth: 1)
         )
     }
 }

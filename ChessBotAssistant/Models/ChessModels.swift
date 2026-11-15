@@ -78,6 +78,28 @@ enum PieceType: String, Codable, CaseIterable, Sendable, Hashable {
         case .king: return "王"
         }
     }
+
+    var fullChineseName: String {
+        switch self {
+        case .pawn: return "兵"
+        case .knight: return "騎士(馬)"
+        case .bishop: return "主教(象)"
+        case .rook: return "城堡(車)"
+        case .queen: return "皇后"
+        case .king: return "國王"
+        }
+    }
+
+    var sfSymbolName: String {
+        switch self {
+        case .pawn: return "arrow.up.circle.fill"
+        case .knight: return "bolt.horizontal.circle.fill"
+        case .bishop: return "diamond.fill"
+        case .rook: return "building.columns.fill"
+        case .queen: return "crown.fill"
+        case .king: return "shield.checkered"
+        }
+    }
 }
 
 struct ChessPiece: Codable, Equatable, Hashable, Sendable {
@@ -93,33 +115,33 @@ struct ChessPiece: Codable, Equatable, Hashable, Sendable {
         String(fenChar)
     }
 
-    /// Outlined unicode glyph (used for white or labels)
+    /// Outlined unicode glyph with text presentation selector (prevents emoji rendering)
     var unicode: String {
         switch (color, type) {
-        case (.white, .king): return "♔"
-        case (.white, .queen): return "♕"
-        case (.white, .rook): return "♖"
-        case (.white, .bishop): return "♗"
-        case (.white, .knight): return "♘"
-        case (.white, .pawn): return "♙"
-        case (.black, .king): return "♚"
-        case (.black, .queen): return "♛"
-        case (.black, .rook): return "♜"
-        case (.black, .bishop): return "♝"
-        case (.black, .knight): return "♞"
-        case (.black, .pawn): return "♟"
+        case (.white, .king): return "♔\u{FE0E}"
+        case (.white, .queen): return "♕\u{FE0E}"
+        case (.white, .rook): return "♖\u{FE0E}"
+        case (.white, .bishop): return "♗\u{FE0E}"
+        case (.white, .knight): return "♘\u{FE0E}"
+        case (.white, .pawn): return "♙\u{FE0E}"
+        case (.black, .king): return "♚\u{FE0E}"
+        case (.black, .queen): return "♛\u{FE0E}"
+        case (.black, .rook): return "♜\u{FE0E}"
+        case (.black, .bishop): return "♝\u{FE0E}"
+        case (.black, .knight): return "♞\u{FE0E}"
+        case (.black, .pawn): return "♟\u{FE0E}"
         }
     }
 
-    /// Filled silhouette glyph (ideal for crisp UI rendering with custom fill + stroke)
+    /// Filled silhouette glyph with text presentation selector (prevents emoji rendering)
     var solidUnicode: String {
         switch type {
-        case .king: return "♚"
-        case .queen: return "♛"
-        case .rook: return "♜"
-        case .bishop: return "♝"
-        case .knight: return "♞"
-        case .pawn: return "♟︎"
+        case .king: return "♚\u{FE0E}"
+        case .queen: return "♛\u{FE0E}"
+        case .rook: return "♜\u{FE0E}"
+        case .bishop: return "♝\u{FE0E}"
+        case .knight: return "♞\u{FE0E}"
+        case .pawn: return "♟\u{FE0E}"
         }
     }
 
@@ -383,6 +405,19 @@ enum BoardTheme: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+struct PinnedPieceInfo: Equatable, Sendable, Identifiable {
+    let square: BoardSquare
+    let piece: ChessPiece
+    let attackerSquare: BoardSquare
+    let attackerPiece: ChessPiece
+
+    var id: String { "\(square.algebraic)-\(attackerSquare.algebraic)" }
+
+    var summaryText: String {
+        "\(square.algebraic)\(piece.type.displayName)(受\(attackerSquare.algebraic)\(attackerPiece.type.displayName)牽制護王)"
+    }
+}
+
 struct TacticalRadarReport: Equatable, Sendable {
     let materialDiffForPerspective: Int
     let capturedByUser: [ChessPiece]
@@ -392,6 +427,9 @@ struct TacticalRadarReport: Equatable, Sendable {
     let freeTargetDescriptions: [String]
     let openingName: String
     let recommendedThinkRange: String
+    let isKingInCheck: Bool
+    let checkingDescriptions: [String]
+    let pinnedPieces: [PinnedPieceInfo]
 }
 
 struct PVLine: Identifiable, Equatable, Sendable {
@@ -406,6 +444,7 @@ struct PVLine: Identifiable, Equatable, Sendable {
     let depth: Int
     let sourceLabel: String
     let predictedOpponentReply: ChessMove?
+    var tacticalReason: String
 
     init(
         multipvIndex: Int,
@@ -416,7 +455,8 @@ struct PVLine: Identifiable, Equatable, Sendable {
         mateInMoves: Int?,
         depth: Int,
         sourceLabel: String,
-        predictedOpponentReply: ChessMove? = nil
+        predictedOpponentReply: ChessMove? = nil,
+        tacticalReason: String = ""
     ) {
         self.multipvIndex = multipvIndex
         self.bestMove = bestMove
@@ -427,16 +467,52 @@ struct PVLine: Identifiable, Equatable, Sendable {
         self.depth = depth
         self.sourceLabel = sourceLabel
         self.predictedOpponentReply = predictedOpponentReply
+        self.tacticalReason = tacticalReason
     }
 
     var id: Int { multipvIndex }
 
-    /// White's win probability (0.0 ... 100.0)
+    /// Phase-calibrated WDL breakdown (Win / Draw / Loss summing to 100%)
+    func wdlBreakdown(for side: PieceColor, gamePhasePly: Int = 20) -> (win: Int, draw: Int, loss: Int) {
+        if let mate = mateInMoves {
+            let whiteWins = mate > 0
+            let sideWins = (side == .white) ? whiteWins : !whiteWins
+            return sideWins ? (100, 0, 0) : (0, 0, 100)
+        }
+
+        let sideCp = Double(side == .white ? scoreCentipawns : -scoreCentipawns)
+        let k = 0.00415
+        let phaseAdjust = max(-35.0, min(25.0, Double(24 - gamePhasePly) * 0.9))
+        let bias = max(75.0, min(140.0, 115.0 + phaseAdjust))
+
+        let wRaw = 1.0 / (1.0 + exp(-k * (sideCp - bias)))
+        let lRaw = 1.0 / (1.0 + exp(-k * (-sideCp - bias)))
+        let dRaw = max(0.0, 1.0 - wRaw - lRaw)
+
+        var wInt = Int((wRaw * 100.0).rounded())
+        var lInt = Int((lRaw * 100.0).rounded())
+        if wInt + lInt > 100 {
+            let excess = wInt + lInt - 100
+            if wInt >= lInt {
+                lInt = max(0, lInt - excess)
+            } else {
+                wInt = max(0, wInt - excess)
+            }
+        }
+        let dInt = max(0, 100 - wInt - lInt)
+        _ = dRaw
+        return (wInt, dInt, lInt)
+    }
+
+    /// Expected score (win% + 0.5 * draw%) for White (0.0 ... 100.0)
     var winProbabilityWhite: Double {
         if let mate = mateInMoves {
             return mate > 0 ? 100.0 : 0.0
         }
-        return 100.0 / (1.0 + exp(-0.00368208 * Double(scoreCentipawns)))
+        let w = 1.0 / (1.0 + exp(-0.00415 * (Double(scoreCentipawns) - 115.0)))
+        let l = 1.0 / (1.0 + exp(-0.00415 * (Double(-scoreCentipawns) - 115.0)))
+        let d = max(0.0, 1.0 - w - l)
+        return min(100.0, max(0.0, (w + 0.5 * d) * 100.0))
     }
 
     func winProbability(for side: PieceColor) -> Double {
