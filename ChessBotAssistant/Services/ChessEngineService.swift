@@ -549,7 +549,8 @@ final class ChessEngineService: ObservableObject {
             isCloudVerified: result.isCloudVerified,
             engineSource: result.engineSource,
             nodesSearched: result.nodesSearched,
-            timestamp: result.timestamp
+            timestamp: result.timestamp,
+            searchTimeMs: result.searchTimeMs
         )
     }
 
@@ -588,8 +589,20 @@ final class ChessEngineService: ObservableObject {
             isCloudVerified: cloud.isCloudVerified,
             engineSource: cloud.engineSource,
             nodesSearched: cloud.nodesSearched,
-            timestamp: cloud.timestamp
+            timestamp: cloud.timestamp,
+            searchTimeMs: cloud.searchTimeMs
         )
+    }
+
+    private nonisolated static func totalPieceCount(in board: ChessBoardState) -> Int {
+        var count = 0
+        for r in 0..<8 {
+            let row = board.squares[r]
+            for c in 0..<8 where row[c] != nil {
+                count += 1
+            }
+        }
+        return count
     }
 
     private func fetchCloudAnalysis(
@@ -603,14 +616,36 @@ final class ChessEngineService: ObservableObject {
             try? await Task.sleep(nanoseconds: jitterNs)
             if Task.isCancelled { return nil }
         }
+        let cloudStart = CFAbsoluteTimeGetCurrent()
         let sfDepth = min(max(requestedDepth, 10), 15)
         let fen = board.toFEN()
+        let isSyzygyEligible = Self.totalPieceCount(in: board) <= 7
 
         return await withTaskGroup(of: EngineAnalysisResult?.self) { group in
+            if isSyzygyEligible {
+                group.addTask { [weak self] in
+                    guard let self,
+                          let syzygyLines = await self.querySyzygyTablebase(board: board, multiPV: multiPV),
+                          !syzygyLines.isEmpty else { return nil }
+                    let elapsedMs = max(1, Int(((CFAbsoluteTimeGetCurrent() - cloudStart) * 1000.0).rounded()))
+                    return EngineAnalysisResult(
+                        fen: fen,
+                        sideToMove: board.sideToMove,
+                        lines: Array(syzygyLines.prefix(multiPV)),
+                        depthReached: 99,
+                        isCloudVerified: true,
+                        engineSource: "Syzygy 7-Man 殘局庫",
+                        nodesSearched: syzygyLines.count,
+                        timestamp: Date(),
+                        searchTimeMs: elapsedMs
+                    )
+                }
+            }
             group.addTask { [weak self] in
                 guard let self,
                       let lichessLines = await self.queryLichessCloudEval(board: board, multiPV: multiPV),
                       !lichessLines.lines.isEmpty else { return nil }
+                let elapsedMs = max(1, Int(((CFAbsoluteTimeGetCurrent() - cloudStart) * 1000.0).rounded()))
                 return EngineAnalysisResult(
                     fen: fen,
                     sideToMove: board.sideToMove,
@@ -619,12 +654,14 @@ final class ChessEngineService: ObservableObject {
                     isCloudVerified: true,
                     engineSource: "Stockfish NNUE (Lichess Cloud)",
                     nodesSearched: lichessLines.knodes * 1000,
-                    timestamp: Date()
+                    timestamp: Date(),
+                    searchTimeMs: elapsedMs
                 )
             }
             group.addTask { [weak self] in
                 guard let self,
                       let sfLine = await self.queryStockfishOnline(board: board, depth: sfDepth) else { return nil }
+                let elapsedMs = max(1, Int(((CFAbsoluteTimeGetCurrent() - cloudStart) * 1000.0).rounded()))
                 return EngineAnalysisResult(
                     fen: fen,
                     sideToMove: board.sideToMove,
@@ -633,7 +670,8 @@ final class ChessEngineService: ObservableObject {
                     isCloudVerified: true,
                     engineSource: "Stockfish 16 NNUE",
                     nodesSearched: 0,
-                    timestamp: Date()
+                    timestamp: Date(),
+                    searchTimeMs: elapsedMs
                 )
             }
 
@@ -643,6 +681,94 @@ final class ChessEngineService: ObservableObject {
                     return valid
                 }
             }
+            return nil
+        }
+    }
+
+    private func querySyzygyTablebase(board: ChessBoardState, multiPV: Int) async -> [PVLine]? {
+        let fen = board.toFEN()
+        guard var components = URLComponents(string: "https://tablebase.lichess.ovh/standard") else { return nil }
+        components.queryItems = [URLQueryItem(name: "fen", value: fen)]
+        guard let url = components.url else { return nil }
+
+        var req = URLRequest(url: url, timeoutInterval: 0.9)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        do {
+            let (data, response) = try await fastURLSession.data(for: req)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            let decoded = try JSONDecoder().decode(SyzygyTablebaseResponse.self, from: data)
+            guard !decoded.moves.isEmpty else { return nil }
+
+            var parsedLines: [PVLine] = []
+            for entry in decoded.moves {
+                if parsedLines.count >= multiPV { break }
+                guard let firstMove = board.legalMove(uci: entry.uci) else { continue }
+
+                var mateMoves: Int? = nil
+                let whiteCP: Int
+
+                if entry.checkmate == true {
+                    mateMoves = board.sideToMove == .white ? 1 : -1
+                    whiteCP = board.sideToMove == .white ? 29990 : -29990
+                } else {
+                    // In Lichess tablebase API, each move's `category` and `dtm` describe the position AFTER the move (opponent's turn).
+                    switch entry.category {
+                    case "loss":
+                        if let dtm = entry.dtm {
+                            let fullMoves = max(1, (abs(dtm) + 2) / 2)
+                            mateMoves = board.sideToMove == .white ? fullMoves : -fullMoves
+                            whiteCP = board.sideToMove == .white ? (30000 - fullMoves * 10) : (-30000 + fullMoves * 10)
+                        } else {
+                            let sideCP = 1800 - min(600, abs(entry.dtz ?? 0) * 8)
+                            whiteCP = board.sideToMove == .white ? sideCP : -sideCP
+                        }
+                    case "blessed-loss":
+                        let sideCP = 140 - min(80, abs(entry.dtz ?? 20))
+                        whiteCP = board.sideToMove == .white ? sideCP : -sideCP
+                    case "draw":
+                        whiteCP = 0
+                    case "cursed-win":
+                        let sideCP = -140 + min(80, abs(entry.dtz ?? 20))
+                        whiteCP = board.sideToMove == .white ? sideCP : -sideCP
+                    case "win":
+                        if let dtm = entry.dtm {
+                            let fullMoves = max(1, (abs(dtm) + 2) / 2)
+                            mateMoves = board.sideToMove == .white ? -fullMoves : fullMoves
+                            whiteCP = board.sideToMove == .white ? (-30000 + fullMoves * 10) : (30000 - fullMoves * 10)
+                        } else {
+                            let sideCP = -1800 + min(600, abs(entry.dtz ?? 0) * 8)
+                            whiteCP = board.sideToMove == .white ? sideCP : -sideCP
+                        }
+                    default:
+                        continue
+                    }
+                }
+
+                let sanText = firstMove.san.isEmpty ? (entry.san ?? firstMove.uci) : firstMove.san
+                let dtzNote = entry.dtz.map { " · Syzygy DTZ \(abs($0))" } ?? ""
+                let baseReason = board.explainMoveTactics(firstMove)
+
+                parsedLines.append(PVLine(
+                    multipvIndex: parsedLines.count + 1,
+                    bestMove: firstMove,
+                    continuationSAN: [sanText],
+                    continuationUCI: [firstMove.uci],
+                    scoreCentipawns: whiteCP,
+                    mateInMoves: mateMoves,
+                    depth: 99,
+                    sourceLabel: "Syzygy 7子",
+                    predictedOpponentReply: Self.extractOpponentReply(
+                        on: board,
+                        firstMove: firstMove,
+                        continuationUCI: [firstMove.uci]
+                    ),
+                    tacticalReason: baseReason + dtzNote
+                ))
+            }
+
+            return parsedLines.isEmpty ? nil : parsedLines
+        } catch {
             return nil
         }
     }
@@ -943,7 +1069,8 @@ final class ChessEngineService: ObservableObject {
             isCloudVerified: result.isCloudVerified,
             engineSource: "\(result.engineSource)（\(modeTag)）",
             nodesSearched: result.nodesSearched,
-            timestamp: result.timestamp
+            timestamp: result.timestamp,
+            searchTimeMs: result.searchTimeMs
         )
     }
 
@@ -976,6 +1103,26 @@ private struct StockfishOnlineResponse: Decodable {
     let mate: Int?
     let bestmove: String?
     let continuation: String?
+}
+
+private struct SyzygyTablebaseResponse: Decodable {
+    struct MoveEntry: Decodable {
+        let uci: String
+        let san: String?
+        let checkmate: Bool?
+        let stalemate: Bool?
+        let insufficient_material: Bool?
+        let dtz: Int?
+        let dtm: Int?
+        let category: String
+    }
+    let checkmate: Bool?
+    let stalemate: Bool?
+    let insufficient_material: Bool?
+    let dtz: Int?
+    let dtm: Int?
+    let category: String
+    let moves: [MoveEntry]
 }
 
 // MARK: - Built-in Offline PeSTO Tapered Alpha-Beta Multi-PV Engine
@@ -1069,6 +1216,219 @@ private enum LocalAlphaBetaEngine {
 
     private static let blackShieldFileMasks: [UInt64] = (0..<8).map { c in
         (UInt64(1) &<< (1 * 8 + c)) | (UInt64(1) &<< (2 * 8 + c))
+    }
+
+    private static let fileMasks: [UInt64] = (0..<8).map { c in
+        var m: UInt64 = 0
+        for r in 0..<8 {
+            m |= (UInt64(1) &<< (r * 8 + c))
+        }
+        return m
+    }
+
+    private static let adjacentFileMasks: [UInt64] = (0..<8).map { c in
+        var m: UInt64 = 0
+        if c > 0 { m |= fileMasks[c - 1] }
+        if c < 7 { m |= fileMasks[c + 1] }
+        return m
+    }
+
+    private static let whiteOutpostMasks: [UInt64] = {
+        var masks = Array(repeating: UInt64(0), count: 64)
+        for r in 0..<8 {
+            for c in 0..<8 {
+                var m: UInt64 = 0
+                for ar in 0..<r {
+                    if c > 0 { m |= (UInt64(1) &<< (ar * 8 + c - 1)) }
+                    if c < 7 { m |= (UInt64(1) &<< (ar * 8 + c + 1)) }
+                }
+                masks[r * 8 + c] = m
+            }
+        }
+        return masks
+    }()
+
+    private static let blackOutpostMasks: [UInt64] = {
+        var masks = Array(repeating: UInt64(0), count: 64)
+        for r in 0..<8 {
+            for c in 0..<8 {
+                var m: UInt64 = 0
+                for ar in (r + 1)..<8 {
+                    if c > 0 { m |= (UInt64(1) &<< (ar * 8 + c - 1)) }
+                    if c < 7 { m |= (UInt64(1) &<< (ar * 8 + c + 1)) }
+                }
+                masks[r * 8 + c] = m
+            }
+        }
+        return masks
+    }()
+
+    private static let whiteOutpostSupportMasks: [UInt64] = {
+        var masks = Array(repeating: UInt64(0), count: 64)
+        for r in 0..<7 {
+            for c in 0..<8 {
+                var m: UInt64 = 0
+                if c > 0 { m |= (UInt64(1) &<< ((r + 1) * 8 + c - 1)) }
+                if c < 7 { m |= (UInt64(1) &<< ((r + 1) * 8 + c + 1)) }
+                masks[r * 8 + c] = m
+            }
+        }
+        return masks
+    }()
+
+    private static let blackOutpostSupportMasks: [UInt64] = {
+        var masks = Array(repeating: UInt64(0), count: 64)
+        for r in 1..<8 {
+            for c in 0..<8 {
+                var m: UInt64 = 0
+                if c > 0 { m |= (UInt64(1) &<< ((r - 1) * 8 + c - 1)) }
+                if c < 7 { m |= (UInt64(1) &<< ((r - 1) * 8 + c + 1)) }
+                masks[r * 8 + c] = m
+            }
+        }
+        return masks
+    }()
+
+    private static func leastValuableAttacker(
+        in grid: [[ChessPiece?]],
+        toRow: Int,
+        toCol: Int,
+        by color: PieceColor
+    ) -> (row: Int, col: Int, type: PieceType)? {
+        // 1. Pawn
+        let pawnRow = toRow + (color == .white ? 1 : -1)
+        if pawnRow >= 0 && pawnRow < 8 {
+            if toCol - 1 >= 0, let p = grid[pawnRow][toCol - 1], p.color == color, p.type == .pawn {
+                return (pawnRow, toCol - 1, .pawn)
+            }
+            if toCol + 1 < 8, let p = grid[pawnRow][toCol + 1], p.color == color, p.type == .pawn {
+                return (pawnRow, toCol + 1, .pawn)
+            }
+        }
+
+        // 2. Knight
+        let knightOffsets = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+        for (dr, dc) in knightOffsets {
+            let nr = toRow + dr
+            let nc = toCol + dc
+            if nr >= 0 && nr < 8 && nc >= 0 && nc < 8,
+               let p = grid[nr][nc], p.color == color, p.type == .knight {
+                return (nr, nc, .knight)
+            }
+        }
+
+        var queenCandidate: (row: Int, col: Int, type: PieceType)? = nil
+
+        // 3. Bishop (or Queen on diagonal)
+        let diagDirs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        for (dr, dc) in diagDirs {
+            var nr = toRow + dr
+            var nc = toCol + dc
+            while nr >= 0 && nr < 8 && nc >= 0 && nc < 8 {
+                if let p = grid[nr][nc] {
+                    if p.color == color {
+                        if p.type == .bishop {
+                            return (nr, nc, .bishop)
+                        } else if p.type == .queen && queenCandidate == nil {
+                            queenCandidate = (nr, nc, .queen)
+                        }
+                    }
+                    break
+                }
+                nr += dr
+                nc += dc
+            }
+        }
+
+        // 4. Rook (or Queen on orthogonal)
+        let orthoDirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        for (dr, dc) in orthoDirs {
+            var nr = toRow + dr
+            var nc = toCol + dc
+            while nr >= 0 && nr < 8 && nc >= 0 && nc < 8 {
+                if let p = grid[nr][nc] {
+                    if p.color == color {
+                        if p.type == .rook {
+                            return (nr, nc, .rook)
+                        } else if p.type == .queen && queenCandidate == nil {
+                            queenCandidate = (nr, nc, .queen)
+                        }
+                    }
+                    break
+                }
+                nr += dr
+                nc += dc
+            }
+        }
+
+        // 5. Queen
+        if let q = queenCandidate {
+            return q
+        }
+
+        // 6. King
+        for dr in -1...1 {
+            for dc in -1...1 {
+                if dr == 0 && dc == 0 { continue }
+                let nr = toRow + dr
+                let nc = toCol + dc
+                if nr >= 0 && nr < 8 && nc >= 0 && nc < 8,
+                   let p = grid[nr][nc], p.color == color, p.type == .king {
+                    return (nr, nc, .king)
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func seeCaptureScore(board: ChessBoardState, move: ChessMove) -> Int {
+        guard let initialCaptured = move.capturedPiece else {
+            if let promo = move.promotion {
+                return pieceBaseValue(promo) - 100
+            }
+            return 0
+        }
+
+        var grid = board.squares
+        if move.isEnPassant {
+            grid[move.from.row][move.to.col] = nil
+        }
+
+        guard let mover = grid[move.from.row][move.from.col] else { return 0 }
+        let placedType = move.promotion ?? mover.type
+
+        var gain: [Int] = []
+        gain.reserveCapacity(12)
+        var firstGain = pieceBaseValue(initialCaptured.type)
+        if move.promotion != nil {
+            firstGain += pieceBaseValue(placedType) - 100
+        }
+        gain.append(firstGain)
+
+        grid[move.from.row][move.from.col] = nil
+        grid[move.to.row][move.to.col] = ChessPiece(color: mover.color, type: placedType)
+
+        var side = board.sideToMove.opposite
+        var currentTargetType = placedType
+
+        while gain.count < 24 {
+            guard let atk = leastValuableAttacker(in: grid, toRow: move.to.row, toCol: move.to.col, by: side) else {
+                break
+            }
+            let nextGain = pieceBaseValue(currentTargetType) - gain[gain.count - 1]
+            gain.append(nextGain)
+            grid[atk.row][atk.col] = nil
+            currentTargetType = atk.type
+            side = side.opposite
+        }
+
+        var idx = gain.count - 1
+        while idx > 0 {
+            gain[idx - 1] = -max(-gain[idx - 1], gain[idx])
+            idx -= 1
+        }
+        return gain[0]
     }
 
     private static let rootOpeningBonuses: [String: Int] = [
@@ -1348,6 +1708,7 @@ private enum LocalAlphaBetaEngine {
         isZeroNetworkMode: Bool = false,
         excludedUCIs: Set<String> = []
     ) -> EngineAnalysisResult {
+        let searchStart = CFAbsoluteTimeGetCurrent()
         let allLegal = board.legalMoves()
         let filteredRoot = excludedUCIs.isEmpty
             ? allLegal
@@ -1363,7 +1724,8 @@ private enum LocalAlphaBetaEngine {
                 isCloudVerified: false,
                 engineSource: "本地引擎 (PeSTO)",
                 nodesSearched: 0,
-                timestamp: Date()
+                timestamp: Date(),
+                searchTimeMs: 0
             )
         }
 
@@ -1395,6 +1757,7 @@ private enum LocalAlphaBetaEngine {
                 predictedOpponentReply: nil,
                 tacticalReason: board.explainMoveTactics(onlyMove)
             )
+            let elapsedMs = max(1, Int(((CFAbsoluteTimeGetCurrent() - searchStart) * 1000.0).rounded()))
             return EngineAnalysisResult(
                 fen: fen,
                 sideToMove: board.sideToMove,
@@ -1405,7 +1768,8 @@ private enum LocalAlphaBetaEngine {
                     ? "本機零連網安全引擎 (強制著)"
                     : "本地離線引擎 (強制著)",
                 nodesSearched: 1,
-                timestamp: Date()
+                timestamp: Date(),
+                searchTimeMs: elapsedMs
             )
         }
 
@@ -1526,6 +1890,7 @@ private enum LocalAlphaBetaEngine {
             ))
         }
 
+        let elapsedMs = max(1, Int(((CFAbsoluteTimeGetCurrent() - searchStart) * 1000.0).rounded()))
         return EngineAnalysisResult(
             fen: fen,
             sideToMove: board.sideToMove,
@@ -1536,7 +1901,8 @@ private enum LocalAlphaBetaEngine {
                 ? "本機零連網安全引擎 (D\(completedDepth))"
                 : "本地離線引擎 (D\(completedDepth))",
             nodesSearched: ctx.nodes,
-            timestamp: Date()
+            timestamp: Date(),
+            searchTimeMs: elapsedMs
         )
     }
 
@@ -1590,9 +1956,11 @@ private enum LocalAlphaBetaEngine {
             }
         }
 
-        // Static pruning (Reverse Futility Pruning & Null-Move Pruning)
+        // Static pruning (Reverse Futility Pruning, Null-Move Pruning, and Forward Futility Pruning prep)
+        var cachedStaticEval: Int? = nil
         if !inCheck && !pvNode && abs(curBeta) < mateScore - 500 && hasNonPawnMaterial(board, color: board.sideToMove) {
             let staticEval = evaluate(board: board)
+            cachedStaticEval = staticEval
 
             if effectiveDepth <= 3 && staticEval - 85 * effectiveDepth >= curBeta {
                 return curBeta
@@ -1638,9 +2006,19 @@ private enum LocalAlphaBetaEngine {
         var bestPacked: UInt16 = ordered[0].packed
         let newDepth = effectiveDepth - 1
 
+        let futilityMargin = effectiveDepth == 1 ? 190 : 360
+        let canFutilityBase = (cachedStaticEval != nil && effectiveDepth <= 2 && abs(bestAlpha) < mateScore - 500)
+
         for (moveIdx, move) in ordered.enumerated() {
             let isQuiet = (move.capturedPiece == nil && move.promotion == nil)
             let next = board.applyingRaw(move)
+
+            if canFutilityBase && moveIdx >= 2 && isQuiet,
+               let staticEval = cachedStaticEval,
+               staticEval + futilityMargin <= bestAlpha,
+               !next.isKingInCheck(next.sideToMove) {
+                continue
+            }
             var childPV: [ChessMove] = []
             var score: Int
 
@@ -1789,15 +2167,32 @@ private enum LocalAlphaBetaEngine {
         let ordered = orderMoves(candidates, board: board, ttPacked: 0, ply: ply, ctx: ctx)
 
         for move in ordered {
+            let precomputedNext: ChessBoardState?
             if !inCheck {
                 let capGain = move.capturedPiece.map { pieceBaseValue($0.type) } ?? 0
                 let promoGain = move.promotion.map { pieceBaseValue($0) } ?? 0
                 if standPat + capGain + promoGain + 180 <= bestAlpha {
                     continue
                 }
+                if move.promotion == nil && move.capturedPiece != nil {
+                    let see = seeCaptureScore(board: board, move: move)
+                    if see < 0 {
+                        let candidateNext = board.applyingRaw(move)
+                        if !candidateNext.isKingInCheck(candidateNext.sideToMove) {
+                            continue
+                        }
+                        precomputedNext = candidateNext
+                    } else {
+                        precomputedNext = nil
+                    }
+                } else {
+                    precomputedNext = nil
+                }
+            } else {
+                precomputedNext = nil
             }
 
-            let next = board.applyingRaw(move)
+            let next = precomputedNext ?? board.applyingRaw(move)
             let score = -quiescence(board: next, alpha: -beta, beta: -bestAlpha, ply: ply + 1, ctx: ctx)
             if ctx.cancelled { return 0 }
             if score >= beta {
@@ -1836,9 +2231,14 @@ private enum LocalAlphaBetaEngine {
                 s = 2_000_000
             } else if let captured = move.capturedPiece {
                 let attackerValue = pieceBaseValue(board.squares[move.from.row][move.from.col]?.type ?? .pawn)
-                s = 1_000_000 + pieceBaseValue(captured.type) * 16 - attackerValue
-                if let promo = move.promotion {
-                    s += 50_000 + pieceBaseValue(promo)
+                let see = seeCaptureScore(board: board, move: move)
+                if see >= 0 || move.promotion != nil {
+                    s = 1_000_000 + see + pieceBaseValue(captured.type) * 8 - (attackerValue / 4)
+                    if let promo = move.promotion {
+                        s += 50_000 + pieceBaseValue(promo)
+                    }
+                } else {
+                    s = -100_000 + see
                 }
             } else if let promo = move.promotion {
                 s = 900_000 + pieceBaseValue(promo)
@@ -1867,7 +2267,7 @@ private enum LocalAlphaBetaEngine {
         return ordered
     }
 
-    /// PeSTO Tapered Evaluation + Bitmask Passed Pawns + King Shield + Precomputed NNUE Micro-Tables
+    /// PeSTO Tapered Evaluation + Bitboard Pawn Structure / Outposts / Rook Files / Mop-Up + Micro-NNUE
     fileprivate static func evaluate(board: ChessBoardState) -> Int {
         var mgWhite = 0, mgBlack = 0
         var egWhite = 0, egBlack = 0
@@ -1877,6 +2277,10 @@ private enum LocalAlphaBetaEngine {
         var blackKingRow = -1, blackKingCol = -1
         var whitePawnsBB: UInt64 = 0
         var blackPawnsBB: UInt64 = 0
+        var whiteKnightsBB: UInt64 = 0
+        var blackKnightsBB: UInt64 = 0
+        var whiteRooksBB: UInt64 = 0
+        var blackRooksBB: UInt64 = 0
 
         for r in 0..<8 {
             let row = board.squares[r]
@@ -1884,6 +2288,7 @@ private enum LocalAlphaBetaEngine {
                 guard let p = row[c] else { continue }
                 phase += piecePhaseWeight(p.type)
                 let sqIdx = p.color == .white ? (r * 8 + c) : ((7 - r) * 8 + c)
+                let bit = UInt64(1) &<< (r * 8 + c)
 
                 let mgMat = mgPieceValue(p.type)
                 let egMat = egPieceValue(p.type)
@@ -1894,7 +2299,6 @@ private enum LocalAlphaBetaEngine {
                 case .pawn:
                     mgPST = mgPawnPST[sqIdx]
                     egPST = egPawnPST[sqIdx]
-                    let bit = UInt64(1) &<< (r * 8 + c)
                     if p.color == .white {
                         whitePawnsBB |= bit
                     } else {
@@ -1903,6 +2307,11 @@ private enum LocalAlphaBetaEngine {
                 case .knight:
                     mgPST = mgKnightPST[sqIdx]
                     egPST = egKnightPST[sqIdx]
+                    if p.color == .white {
+                        whiteKnightsBB |= bit
+                    } else {
+                        blackKnightsBB |= bit
+                    }
                 case .bishop:
                     mgPST = mgBishopPST[sqIdx]
                     egPST = egBishopPST[sqIdx]
@@ -1910,6 +2319,11 @@ private enum LocalAlphaBetaEngine {
                 case .rook:
                     mgPST = mgRookPST[sqIdx]
                     egPST = egRookPST[sqIdx]
+                    if p.color == .white {
+                        whiteRooksBB |= bit
+                    } else {
+                        blackRooksBB |= bit
+                    }
                 case .queen:
                     mgPST = mgQueenPST[sqIdx]
                     egPST = egQueenPST[sqIdx]
@@ -1961,6 +2375,105 @@ private enum LocalAlphaBetaEngine {
             }
         }
 
+        // Doubled & Isolated Pawns
+        for c in 0..<8 {
+            let fMask = fileMasks[c]
+            let adjMask = adjacentFileMasks[c]
+            let wpCount = (whitePawnsBB & fMask).nonzeroBitCount
+            if wpCount >= 2 {
+                let dbl = wpCount - 1
+                mgWhite -= 12 * dbl
+                egWhite -= 18 * dbl
+            }
+            if wpCount > 0 && (whitePawnsBB & adjMask) == 0 {
+                mgWhite -= 14 * wpCount
+                egWhite -= 16 * wpCount
+            }
+
+            let bpCount = (blackPawnsBB & fMask).nonzeroBitCount
+            if bpCount >= 2 {
+                let dbl = bpCount - 1
+                mgBlack -= 12 * dbl
+                egBlack -= 18 * dbl
+            }
+            if bpCount > 0 && (blackPawnsBB & adjMask) == 0 {
+                mgBlack -= 14 * bpCount
+                egBlack -= 16 * bpCount
+            }
+        }
+
+        // Rook Open / Semi-Open File & 7th Rank
+        var wr = whiteRooksBB
+        while wr != 0 {
+            let sq = wr.trailingZeroBitCount
+            wr &= wr &- 1
+            let r = sq >> 3
+            let c = sq & 7
+            if r == 1 {
+                mgWhite += 22
+                egWhite += 32
+            }
+            if (whitePawnsBB & fileMasks[c]) == 0 {
+                if (blackPawnsBB & fileMasks[c]) == 0 {
+                    mgWhite += 24
+                    egWhite += 18
+                } else {
+                    mgWhite += 12
+                    egWhite += 8
+                }
+            }
+        }
+
+        var br = blackRooksBB
+        while br != 0 {
+            let sq = br.trailingZeroBitCount
+            br &= br &- 1
+            let r = sq >> 3
+            let c = sq & 7
+            if r == 6 {
+                mgBlack += 22
+                egBlack += 32
+            }
+            if (blackPawnsBB & fileMasks[c]) == 0 {
+                if (whitePawnsBB & fileMasks[c]) == 0 {
+                    mgBlack += 24
+                    egBlack += 18
+                } else {
+                    mgBlack += 12
+                    egBlack += 8
+                }
+            }
+        }
+
+        // Protected Knight Outposts
+        var wn = whiteKnightsBB
+        while wn != 0 {
+            let sq = wn.trailingZeroBitCount
+            wn &= wn &- 1
+            let r = sq >> 3
+            let c = sq & 7
+            if r >= 2 && r <= 4 && c >= 1 && c <= 6 &&
+               (blackPawnsBB & whiteOutpostMasks[sq]) == 0 &&
+               (whitePawnsBB & whiteOutpostSupportMasks[sq]) != 0 {
+                mgWhite += 26
+                egWhite += 16
+            }
+        }
+
+        var bn = blackKnightsBB
+        while bn != 0 {
+            let sq = bn.trailingZeroBitCount
+            bn &= bn &- 1
+            let r = sq >> 3
+            let c = sq & 7
+            if r >= 3 && r <= 5 && c >= 1 && c <= 6 &&
+               (whitePawnsBB & blackOutpostMasks[sq]) == 0 &&
+               (blackPawnsBB & blackOutpostSupportMasks[sq]) != 0 {
+                mgBlack += 26
+                egBlack += 16
+            }
+        }
+
         // Castled king pawn shield bonus (middlegame)
         if whiteKingRow == 7 && (whiteKingCol >= 5 || whiteKingCol <= 2) {
             for fc in max(0, whiteKingCol - 1)...min(7, whiteKingCol + 1) {
@@ -1981,10 +2494,22 @@ private enum LocalAlphaBetaEngine {
         if blackBishops >= 2 { mgBlack += 30; egBlack += 45 }
 
         let clampedPhase = min(24, phase)
+        if clampedPhase <= 4 && whiteKingRow >= 0 && blackKingRow >= 0 {
+            let rawEgDiff = egWhite - egBlack
+            let kingDist = abs(whiteKingRow - blackKingRow) + abs(whiteKingCol - blackKingCol)
+            if rawEgDiff >= 180 {
+                let edgePush = abs(blackKingRow * 2 - 7) + abs(blackKingCol * 2 - 7)
+                egWhite += edgePush * 8 + (14 - kingDist) * 5
+            } else if rawEgDiff <= -180 {
+                let edgePush = abs(whiteKingRow * 2 - 7) + abs(whiteKingCol * 2 - 7)
+                egBlack += edgePush * 8 + (14 - kingDist) * 5
+            }
+        }
+
         let mgDiff = mgWhite - mgBlack
         let egDiff = egWhite - egBlack
         let taperedWhite = (mgDiff * clampedPhase + egDiff * (24 - clampedPhase)) / 24
 
-        return board.sideToMove == .white ? taperedWhite : -taperedWhite
+        return (board.sideToMove == .white ? taperedWhite : -taperedWhite) + 10
     }
 }

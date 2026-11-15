@@ -851,6 +851,8 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
             thinkRange = "3~5 秒"
         }
 
+        let immediateThreat = detectImmediateEnemyThreat(for: camp)
+
         return TacticalRadarReport(
             materialDiffForPerspective: materialDiff,
             capturedByUser: capturedByUser,
@@ -862,8 +864,110 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
             recommendedThinkRange: thinkRange,
             isKingInCheck: inCheck,
             checkingDescriptions: Array(checkingDescs.prefix(2)),
-            pinnedPieces: Array(pins.prefix(3))
+            pinnedPieces: Array(pins.prefix(3)),
+            immediateThreat: immediateThreat
         )
+    }
+
+    /// Scans immediate opponent tactical threats (mate-in-1, profitable capture >= 220cp, or fork/discovered attack on valuable pieces).
+    func detectImmediateEnemyThreat(for camp: PieceColor) -> EnemyThreatAlert? {
+        let enemy = camp.opposite
+        guard !isKingInCheck(camp), !isKingInCheck(enemy) else { return nil }
+
+        var enemyTurnBoard = self
+        enemyTurnBoard.sideToMove = enemy
+        enemyTurnBoard.enPassantTarget = nil
+        let enemyMoves = enemyTurnBoard.legalMoves(includeFormattedSAN: false)
+        guard !enemyMoves.isEmpty else { return nil }
+
+        var bestCapture: (gain: Int, move: ChessMove, pieceName: String)? = nil
+        var bestFork: (valueScore: Int, move: ChessMove, summary: String)? = nil
+
+        var friendlyHighTargets: [(row: Int, col: Int, piece: ChessPiece)] = []
+        for r in 0..<8 {
+            for c in 0..<8 {
+                if let p = squares[r][c], p.color == camp, p.type != .pawn {
+                    friendlyHighTargets.append((r, c, p))
+                }
+            }
+        }
+
+        for move in enemyMoves {
+            let after = enemyTurnBoard.applyingRaw(move)
+            if after.isKingInCheck(camp) && after.legalMoves(includeFormattedSAN: false).isEmpty {
+                return EnemyThreatAlert(
+                    severity: 3,
+                    summary: "警訊：對手威脅將殺於 \(move.to.algebraic)，請優先防守要道",
+                    targetSquare: move.to
+                )
+            }
+
+            if let captured = move.capturedPiece, captured.color == camp, captured.type != .king {
+                let attackerVal = enemyTurnBoard.squares[move.from.row][move.from.col]?.type.baseValue ?? 100
+                let isDefendedAfter = after.isSquareAttacked(row: move.to.row, col: move.to.col, by: camp)
+                let promoGain = move.promotion == .queen ? 400 : 0
+                let netGain = captured.type.baseValue - (isDefendedAfter ? attackerVal : 0) + promoGain
+                if netGain >= 220 {
+                    if bestCapture == nil || netGain > bestCapture!.gain {
+                        bestCapture = (netGain, move, captured.type.displayName)
+                    }
+                }
+            } else if move.capturedPiece == nil,
+                      let mover = enemyTurnBoard.squares[move.from.row][move.from.col],
+                      mover.type != .king,
+                      friendlyHighTargets.count >= 2 {
+                let minDefenderVal = after.lowestAttackerValue(row: move.to.row, col: move.to.col, by: camp)
+                let enemyDefended = after.isSquareAttacked(row: move.to.row, col: move.to.col, by: enemy)
+                let landedSafely: Bool
+                if let minDef = minDefenderVal {
+                    landedSafely = enemyDefended ? (minDef >= mover.type.baseValue) : (minDef > mover.type.baseValue)
+                } else {
+                    landedSafely = true
+                }
+                guard landedSafely else { continue }
+
+                var newlyAttacked: [ChessPiece] = []
+                for target in friendlyHighTargets {
+                    if !isSquareAttacked(row: target.row, col: target.col, by: enemy),
+                       after.isSquareAttacked(row: target.row, col: target.col, by: enemy) {
+                        newlyAttacked.append(target.piece)
+                    }
+                }
+                if newlyAttacked.count >= 2 {
+                    let hasRoyalOrMajor = newlyAttacked.contains {
+                        $0.type == .king || $0.type == .queen || $0.type == .rook
+                    }
+                    if hasRoyalOrMajor {
+                        let names = newlyAttacked.prefix(2).map(\.type.displayName).joined(separator: "與")
+                        let score = newlyAttacked.reduce(0) { $0 + min($1.type.baseValue, 1200) }
+                        if bestFork == nil || score > bestFork!.valueScore {
+                            bestFork = (
+                                score,
+                                move,
+                                "對手蘊含 \(mover.type.displayName)\(move.to.algebraic) 捉雙\(names)威脅"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if let cap = bestCapture {
+            let lossText = String(format: "%.1f", Double(cap.gain) / 100.0)
+            return EnemyThreatAlert(
+                severity: 2,
+                summary: "警訊：對手瞄準\(cap.pieceName)\(cap.move.to.algebraic)（預計淨損 \(lossText) 兵）",
+                targetSquare: cap.move.to
+            )
+        }
+        if let fork = bestFork {
+            return EnemyThreatAlert(
+                severity: 1,
+                summary: fork.summary,
+                targetSquare: fork.move.to
+            )
+        }
+        return nil
     }
 
     func checkingPieces(for camp: PieceColor) -> [(square: BoardSquare, piece: ChessPiece)] {

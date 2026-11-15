@@ -115,6 +115,16 @@ struct EngineSettingsSheetView: View {
                         Label("掃描後中文語音播報最佳步", systemImage: "speaker.wave.2.fill")
                     }
                     .tint(.cyan)
+
+                    Toggle(isOn: $viewModel.threatRadarEnabled) {
+                        Label("敵方即時殺招與捉雙雷達預警", systemImage: "exclamationmark.shield.fill")
+                    }
+                    .tint(.orange)
+
+                    Toggle(isOn: $viewModel.hapticAlertEnabled) {
+                        Label("將殺 / 將軍 / 失誤震動提示", systemImage: "iphone.radiowaves.left.and.right")
+                    }
+                    .tint(.yellow)
                 } header: {
                     Label("陣營判斷、風格與進階戰術設定", systemImage: "safari.fill")
                 }

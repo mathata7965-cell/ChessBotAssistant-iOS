@@ -19,6 +19,25 @@ struct RecognizedBoardResult: Sendable {
 final class ScreenshotBoardRecognizer: Sendable {
     static let shared = ScreenshotBoardRecognizer()
 
+    private final class BoardRectCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var normalizedRect: CGRect?
+
+        func get() -> CGRect? {
+            lock.lock()
+            defer { lock.unlock() }
+            return normalizedRect
+        }
+
+        func set(_ rect: CGRect?) {
+            lock.lock()
+            defer { lock.unlock() }
+            normalizedRect = rect
+        }
+    }
+
+    private let rectCache = BoardRectCache()
+
     private init() {}
 
     func recognizeBoard(
@@ -221,6 +240,37 @@ final class ScreenshotBoardRecognizer: Sendable {
             return nil
         }
 
+        // Fast-path: validate previous board bounding box before full grid scan (~5x speedup)
+        if let norm = rectCache.get() {
+            let cachedX = Int((norm.minX * Double(targetW)).rounded())
+            let cachedY = Int((norm.minY * Double(targetH)).rounded())
+            let cachedSize = Int((norm.width * Double(targetW)).rounded())
+            let expectedH = norm.height * Double(targetH)
+            if cachedSize >= 96,
+               abs(expectedH - Double(cachedSize)) <= 2.5,
+               cachedX >= 0, cachedY >= 0,
+               cachedX + cachedSize <= targetW,
+               cachedY + cachedSize <= targetH {
+                let fastScore = evaluateCheckerboardScore(
+                    rgba: rgba,
+                    bufW: targetW,
+                    bufH: targetH,
+                    x: cachedX,
+                    y: cachedY,
+                    size: cachedSize
+                )
+                if fastScore >= 52.0 {
+                    let side = (norm.width * Double(origW)).rounded()
+                    return CGRect(
+                        x: (norm.minX * Double(origW)).rounded(),
+                        y: (norm.minY * Double(origH)).rounded(),
+                        width: min(side, Double(origW)),
+                        height: min(side, Double(origH))
+                    ).integral
+                }
+            }
+        }
+
         let minDim = min(targetW, targetH)
         var candidateSizes: [Int] = []
         if targetW <= targetH {
@@ -332,8 +382,16 @@ final class ScreenshotBoardRecognizer: Sendable {
         let bestBox = CGRect(x: bestX, y: bestY, width: bestSize, height: bestSize)
 
         guard bestScore >= 40.0 else {
+            rectCache.set(nil)
             return nil
         }
+
+        rectCache.set(CGRect(
+            x: bestBox.minX / Double(targetW),
+            y: bestBox.minY / Double(targetH),
+            width: bestBox.width / Double(targetW),
+            height: bestBox.height / Double(targetH)
+        ))
 
         // Convert back to original image pixels
         let invScale = 1.0 / scale

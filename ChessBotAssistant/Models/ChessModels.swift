@@ -443,6 +443,12 @@ struct PinnedPieceInfo: Equatable, Sendable, Identifiable {
     }
 }
 
+struct EnemyThreatAlert: Equatable, Sendable {
+    let severity: Int // 3 = 一步將殺威脅, 2 = 嚴重丟子威脅, 1 = 戰術捉雙威脅
+    let summary: String
+    let targetSquare: BoardSquare?
+}
+
 struct TacticalRadarReport: Equatable, Sendable {
     let materialDiffForPerspective: Int
     let capturedByUser: [ChessPiece]
@@ -455,6 +461,35 @@ struct TacticalRadarReport: Equatable, Sendable {
     let isKingInCheck: Bool
     let checkingDescriptions: [String]
     let pinnedPieces: [PinnedPieceInfo]
+    let immediateThreat: EnemyThreatAlert?
+
+    init(
+        materialDiffForPerspective: Int,
+        capturedByUser: [ChessPiece],
+        capturedByOpponent: [ChessPiece],
+        hangingFriendlySquares: [BoardSquare],
+        hangingDescriptions: [String],
+        freeTargetDescriptions: [String],
+        openingName: String,
+        recommendedThinkRange: String,
+        isKingInCheck: Bool,
+        checkingDescriptions: [String],
+        pinnedPieces: [PinnedPieceInfo],
+        immediateThreat: EnemyThreatAlert? = nil
+    ) {
+        self.materialDiffForPerspective = materialDiffForPerspective
+        self.capturedByUser = capturedByUser
+        self.capturedByOpponent = capturedByOpponent
+        self.hangingFriendlySquares = hangingFriendlySquares
+        self.hangingDescriptions = hangingDescriptions
+        self.freeTargetDescriptions = freeTargetDescriptions
+        self.openingName = openingName
+        self.recommendedThinkRange = recommendedThinkRange
+        self.isKingInCheck = isKingInCheck
+        self.checkingDescriptions = checkingDescriptions
+        self.pinnedPieces = pinnedPieces
+        self.immediateThreat = immediateThreat
+    }
 }
 
 struct PVLine: Identifiable, Equatable, Sendable {
@@ -570,6 +605,29 @@ struct EngineAnalysisResult: Equatable, Sendable {
     let engineSource: String
     let nodesSearched: Int
     let timestamp: Date
+    let searchTimeMs: Int
+
+    init(
+        fen: String,
+        sideToMove: PieceColor,
+        lines: [PVLine],
+        depthReached: Int,
+        isCloudVerified: Bool,
+        engineSource: String,
+        nodesSearched: Int,
+        timestamp: Date,
+        searchTimeMs: Int = 0
+    ) {
+        self.fen = fen
+        self.sideToMove = sideToMove
+        self.lines = lines
+        self.depthReached = depthReached
+        self.isCloudVerified = isCloudVerified
+        self.engineSource = engineSource
+        self.nodesSearched = nodesSearched
+        self.timestamp = timestamp
+        self.searchTimeMs = searchTimeMs
+    }
 
     var primaryLine: PVLine? { lines.first }
 

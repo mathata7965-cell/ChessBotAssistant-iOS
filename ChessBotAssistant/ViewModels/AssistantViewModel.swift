@@ -59,6 +59,61 @@ final class AssistantViewModel: ObservableObject {
     @Published var isWaitingForOpponentReply: Bool = false
     @Published var paceRecommendedSeconds: Int = 3
     @Published var paceElapsedSeconds: Int = 0
+    @Published var threatRadarEnabled: Bool = true
+    @Published var hapticAlertEnabled: Bool = true
+    @Published var previewPlyOffset: Int = 0
+    @Published var selectedPreviewPVIndex: Int = 1
+
+    var activePreviewLine: PVLine? {
+        if let selected = engineService.currentAnalysis?.lines.first(where: { $0.multipvIndex == selectedPreviewPVIndex }) {
+            return selected
+        }
+        return engineService.currentAnalysis?.primaryLine
+    }
+
+    var previewMaxPlies: Int {
+        min(8, activePreviewLine?.continuationUCI.count ?? 0)
+    }
+
+    var displayedBoardState: ChessBoardState {
+        guard previewPlyOffset > 0, !isWaitingForOpponentReply, !isFairPlaySafetyLocked,
+              let line = activePreviewLine else {
+            return boardState
+        }
+        var cursor = boardState
+        for uci in line.continuationUCI.prefix(previewPlyOffset) {
+            guard let move = cursor.legalMove(uci: uci) else { break }
+            cursor = cursor.applying(move)
+        }
+        return cursor
+    }
+
+    var displayedLastMove: ChessMove? {
+        guard previewPlyOffset > 0, !isWaitingForOpponentReply, !isFairPlaySafetyLocked,
+              let line = activePreviewLine else {
+            return lastMove
+        }
+        var cursor = boardState
+        var latestMove: ChessMove? = lastMove
+        for uci in line.continuationUCI.prefix(previewPlyOffset) {
+            guard let move = cursor.legalMove(uci: uci) else { break }
+            cursor = cursor.applying(move)
+            latestMove = move
+        }
+        return latestMove
+    }
+
+    var previewStepMoveLabel: String {
+        guard previewPlyOffset > 0, let line = activePreviewLine else { return "" }
+        let idx = previewPlyOffset - 1
+        if idx >= 0 && idx < line.continuationSAN.count {
+            return line.continuationSAN[idx]
+        }
+        if idx >= 0 && idx < line.continuationUCI.count {
+            return line.continuationUCI[idx]
+        }
+        return ""
+    }
 
     var paceRemainingSeconds: Int {
         max(0, paceRecommendedSeconds - paceElapsedSeconds)
@@ -126,6 +181,7 @@ final class AssistantViewModel: ObservableObject {
     private var previousAcceptedSquares: [[ChessPiece?]]?
     private var lastAcceptedMoveTime: CFTimeInterval = 0
     private var paceTimer: Timer?
+    private var lastHapticKey: String = ""
 
     init() {
         UNUserNotificationCenter.current().delegate = TacticalBannerNotificationDelegate.shared
@@ -179,12 +235,22 @@ final class AssistantViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] analysis in
                 guard let self else { return }
+                self.syncPiPContent()
                 if let analysis {
                     self.recordAnalysisTelemetry(analysis)
+                    self.triggerHapticAlertsIfNeeded(analysis: analysis)
                     self.speakMoveAnnouncementIfNeeded(analysis)
                     self.postBigScreenTacticalBannerIfNeeded(analysis)
+                    self.syncPiPContent()
                 }
-                self.syncPiPContent()
+            }
+            .store(in: &cancellables)
+
+        $threatRadarEnabled
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.syncPiPContent()
             }
             .store(in: &cancellables)
 
@@ -325,6 +391,7 @@ final class AssistantViewModel: ObservableObject {
     func syncPiPContent() {
         let radar = boardState.buildTacticalRadar(for: perspective, moveHistorySAN: moveHistorySAN)
         tacticalRadar = radar
+        let activeThreatSummary = (threatRadarEnabled ? radar.immediateThreat?.summary : nil) ?? ""
         pipManager.updateContent(
             board: boardState,
             lastMove: lastMove,
@@ -352,8 +419,32 @@ final class AssistantViewModel: ObservableObject {
             pinnedSummary: radar.pinnedPieces.map(\.summaryText).joined(separator: "、"),
             lastKnownWinPct: lastKnownWinPct,
             lastKnownWDL: lastKnownWDL,
-            lastKnownEvalStr: lastKnownEvalStr
+            lastKnownEvalStr: lastKnownEvalStr,
+            threatSummary: activeThreatSummary,
+            searchTimeMs: engineService.currentAnalysis?.searchTimeMs ?? 0
         )
+    }
+
+    func stepPreviewForward() {
+        guard previewPlyOffset < previewMaxPlies else { return }
+        previewPlyOffset += 1
+        clearSelection()
+    }
+
+    func stepPreviewBackward() {
+        guard previewPlyOffset > 0 else { return }
+        previewPlyOffset -= 1
+        clearSelection()
+    }
+
+    func resetPreviewToLive() {
+        previewPlyOffset = 0
+        clearSelection()
+    }
+
+    func selectPreviewPVLine(_ line: PVLine) {
+        selectedPreviewPVIndex = line.multipvIndex
+        previewPlyOffset = 0
     }
 
     func triggerAnalysis(preserveExcludedMoves: Bool = false) {
@@ -369,10 +460,12 @@ final class AssistantViewModel: ObservableObject {
 
     func forceAnalyzeNow() {
         isWaitingForOpponentReply = false
+        previewPlyOffset = 0
         triggerAnalysis()
     }
 
     func skipBlockedMoveAndReanalyze() {
+        previewPlyOffset = 0
         guard let bestMove = engineService.currentAnalysis?.primaryLine?.bestMove else {
             showBanner("目前無可切換的推薦步，已重新計算最佳解")
             triggerAnalysis()
@@ -486,6 +579,8 @@ final class AssistantViewModel: ObservableObject {
         moveHistorySAN.append(san)
         boardState = boardState.applying(move)
         lastMove = move
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         clearSelection()
         triggerAnalysis()
     }
@@ -518,6 +613,8 @@ final class AssistantViewModel: ObservableObject {
         }
         boardState = previous
         lastMove = nil
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         clearSelection()
         triggerAnalysis()
     }
@@ -527,6 +624,8 @@ final class AssistantViewModel: ObservableObject {
         moveHistorySAN.removeAll()
         boardState = .startingPosition
         lastMove = nil
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         isBoardDetected = false
         isWaitingForOpponentReply = false
         isFairPlaySafetyLocked = false
@@ -542,6 +641,7 @@ final class AssistantViewModel: ObservableObject {
         moveAccuracyScores.removeAll()
         lastEvaluatedFEN = nil
         lastNotifiedBannerKey = ""
+        lastHapticKey = ""
         previousCampWinPct = nil
         lastSpokenFEN = nil
         pendingBroadcastKey = nil
@@ -562,6 +662,8 @@ final class AssistantViewModel: ObservableObject {
         detectedCampReason = "手動切換：\(perspective.displayName)"
         previousCampWinPct = nil
         lastMoveQualityBadge = nil
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         if alwaysAnalyzeMyCampTurn {
             boardState.sideToMove = perspective
             boardState.enPassantTarget = nil
@@ -719,6 +821,29 @@ final class AssistantViewModel: ObservableObject {
         previousCampWinPct = currentCampPct
     }
 
+    private func triggerHapticAlertsIfNeeded(analysis: EngineAnalysisResult) {
+        guard hapticAlertEnabled, isBoardDetected, let primary = analysis.primaryLine else { return }
+        let threatSeverity = threatRadarEnabled ? (tacticalRadar.immediateThreat?.severity ?? 0) : 0
+        let mateVal = primary.mateInMoves ?? 0
+        let key = "\(analysis.fen)|\(tacticalRadar.isKingInCheck)|\(threatSeverity)|\(mateVal)|\(lastMoveQualityBadge ?? "")"
+        guard key != lastHapticKey else { return }
+        lastHapticKey = key
+
+        let isOpponentMate = (perspective == .white && mateVal < 0) || (perspective == .black && mateVal > 0)
+        let isMyMate = (perspective == .white && mateVal > 0) || (perspective == .black && mateVal < 0)
+        let isBlunder = lastMoveQualityBadge?.contains("[失誤]") == true
+
+        if tacticalRadar.isKingInCheck || threatSeverity >= 2 || isOpponentMate || isBlunder {
+            let gen = UINotificationFeedbackGenerator()
+            gen.prepare()
+            gen.notificationOccurred(.warning)
+        } else if isMyMate {
+            let gen = UINotificationFeedbackGenerator()
+            gen.prepare()
+            gen.notificationOccurred(.success)
+        }
+    }
+
     private func speakMoveAnnouncementIfNeeded(_ analysis: EngineAnalysisResult) {
         guard voiceAnnounceEnabled else { return }
         guard analysis.fen != lastSpokenFEN, let bestMove = analysis.primaryLine?.bestMove else { return }
@@ -807,15 +932,27 @@ final class AssistantViewModel: ObservableObject {
             ? boardState.explainMoveTactics(primary.bestMove)
             : primary.tacticalReason
         let replySAN = (engineService.showOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
+        let mateSuffix: String
+        if let mate = primary.mateInMoves {
+            let isMyMate = (perspective == .white && mate > 0) || (perspective == .black && mate < 0)
+            mateSuffix = isMyMate ? " [必殺M\(abs(mate))]" : " [敵殺M\(abs(mate))]"
+        } else {
+            mateSuffix = ""
+        }
+        let threatNote = (threatRadarEnabled ? tacticalRadar.immediateThreat?.summary : nil) ?? ""
 
         let content = UNMutableNotificationContent()
         if engineService.coachPieceOnlyHintMode {
-            content.title = "勝率 \(winPct)% (\(primary.formattedScore))｜建議動：\(pieceName) (\(primary.bestMove.from.algebraic))"
+            content.title = "勝率 \(winPct)% (\(primary.formattedScore))\(mateSuffix)｜建議動：\(pieceName) (\(primary.bestMove.from.algebraic))"
         } else {
-            content.title = "勝率 \(winPct)% (\(primary.formattedScore))｜\(pieceName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]"
+            content.title = "勝率 \(winPct)% (\(primary.formattedScore))\(mateSuffix)｜\(pieceName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]"
         }
         content.subtitle = "螢幕位置：\(posHint)｜勝\(wdl.win)% 和\(wdl.draw)% 負\(wdl.loss)%"
-        content.body = "戰術目的：\(reasonText)｜預計敵應：\(replySAN)"
+        if !threatNote.isEmpty {
+            content.body = "\(threatNote)｜戰術：\(reasonText)"
+        } else {
+            content.body = "戰術目的：\(reasonText)｜預計敵應：\(replySAN)"
+        }
         content.interruptionLevel = .active
 
         let request = UNNotificationRequest(
@@ -830,6 +967,8 @@ final class AssistantViewModel: ObservableObject {
         history.append(boardState)
         boardState.sideToMove = boardState.sideToMove.opposite
         boardState.enPassantTarget = nil
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         clearSelection()
         showBanner("目前輪到：\(boardState.sideToMove.displayName)")
         triggerAnalysis()
@@ -864,6 +1003,8 @@ final class AssistantViewModel: ObservableObject {
         boardState = parsed.state
         isBoardDetected = true
         lastMove = nil
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         clearSelection()
         showBanner("已成功載入局面（輪到\(boardState.sideToMove.displayName)）")
         triggerAnalysis()
@@ -875,6 +1016,8 @@ final class AssistantViewModel: ObservableObject {
         boardState = editedBoard
         isBoardDetected = true
         lastMove = nil
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         clearSelection()
         showBanner("已套用自訂棋盤局面")
         triggerAnalysis()
@@ -927,6 +1070,8 @@ final class AssistantViewModel: ObservableObject {
             if isBoardDetected {
                 isBoardDetected = false
                 isWaitingForOpponentReply = false
+                previewPlyOffset = 0
+                selectedPreviewPVIndex = 1
                 engineService.clearAnalysis()
                 syncPiPContent()
             }
@@ -1025,6 +1170,8 @@ final class AssistantViewModel: ObservableObject {
             history.append(boardState)
             boardState = adjustedBoard
             perspective = newPerspective
+            previewPlyOffset = 0
+            selectedPreviewPVIndex = 1
             isFairPlaySafetyLocked = false
             safetyLockReason = nil
             clearSelection()
@@ -1249,6 +1396,8 @@ final class AssistantViewModel: ObservableObject {
         isBoardDetected = true
         previousAcceptedSquares = nil
         lastMove = nil
+        previewPlyOffset = 0
+        selectedPreviewPVIndex = 1
         clearSelection()
         if isFairPlaySafetyLocked {
             showBanner("[安全鎖定] \(result.detectedMatchContextNote)")

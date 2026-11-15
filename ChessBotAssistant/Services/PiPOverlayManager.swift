@@ -53,6 +53,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
     private var latestLastKnownWinPct: Int = 50
     private var latestLastKnownWDL: (win: Int, draw: Int, loss: Int) = (38, 24, 38)
     private var latestLastKnownEvalStr: String = "0.00"
+    private var latestThreatSummary: String = ""
+    private var latestSearchTimeMs: Int = 0
     private var contentRevision: UInt64 = 0
     private var renderedRevision: UInt64 = 0
     private var cachedPixelBuffer: CVPixelBuffer?
@@ -138,7 +140,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         pinnedSummary: String = "",
         lastKnownWinPct: Int = 50,
         lastKnownWDL: (win: Int, draw: Int, loss: Int) = (38, 24, 38),
-        lastKnownEvalStr: String = "0.00"
+        lastKnownEvalStr: String = "0.00",
+        threatSummary: String = "",
+        searchTimeMs: Int = 0
     ) {
         self.latestBoard = board
         self.latestLastMove = lastMove
@@ -167,6 +171,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         self.latestLastKnownWinPct = lastKnownWinPct
         self.latestLastKnownWDL = lastKnownWDL
         self.latestLastKnownEvalStr = lastKnownEvalStr
+        self.latestThreatSummary = threatSummary
+        self.latestSearchTimeMs = searchTimeMs
         contentRevision &+= 1
         pushCurrentFrame(forceRedraw: true)
     }
@@ -767,14 +773,28 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                 : primary.tacticalReason
             let replyStr = (latestShowOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
 
+            var mateTag = ""
+            if let mate = primary.mateInMoves {
+                let isMyMate = (latestPerspective == .white && mate > 0) || (latestPerspective == .black && mate < 0)
+                mateTag = isMyMate ? " [必殺M\(abs(mate))]" : " [敵殺M\(abs(mate))]"
+            }
             let headline = latestCoachPieceOnlyMode
-                ? "動：\(pieceFullName) (\(primary.bestMove.from.algebraic))"
-                : "#1 \(pieceFullName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]"
+                ? "動：\(pieceFullName) (\(primary.bestMove.from.algebraic))\(mateTag)"
+                : "#1 \(pieceFullName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]\(mateTag)"
+            let headlineColor: UIColor
+            if let mate = primary.mateInMoves {
+                let isMyMate = (latestPerspective == .white && mate > 0) || (latestPerspective == .black && mate < 0)
+                headlineColor = isMyMate
+                    ? UIColor(red: 1.0, green: 0.84, blue: 0.25, alpha: 1.0)
+                    : UIColor(red: 1.0, green: 0.50, blue: 0.48, alpha: 1.0)
+            } else {
+                headlineColor = UIColor.white
+            }
             NSString(string: headline).draw(
                 in: CGRect(x: infoX, y: 19, width: infoW, height: 26),
                 withAttributes: [
                     .font: UIFont.systemFont(ofSize: 19, weight: .heavy),
-                    .foregroundColor: UIColor.white,
+                    .foregroundColor: headlineColor,
                     .paragraphStyle: truncPara
                 ]
             )
@@ -788,11 +808,20 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                 ]
             )
 
-            NSString(string: "目的：\(reasonText)｜敵應：\(replyStr)").draw(
+            let thirdLineText: String
+            let thirdLineColor: UIColor
+            if !latestThreatSummary.isEmpty {
+                thirdLineText = latestThreatSummary
+                thirdLineColor = UIColor(red: 1.0, green: 0.66, blue: 0.34, alpha: 1.0)
+            } else {
+                thirdLineText = "目的：\(reasonText)｜敵應：\(replyStr)"
+                thirdLineColor = UIColor(red: 0.64, green: 0.98, blue: 0.72, alpha: 1.0)
+            }
+            NSString(string: thirdLineText).draw(
                 in: CGRect(x: infoX, y: 70, width: infoW, height: 20),
                 withAttributes: [
                     .font: UIFont.systemFont(ofSize: 12.5, weight: .bold),
-                    .foregroundColor: UIColor(red: 0.64, green: 0.98, blue: 0.72, alpha: 1.0),
+                    .foregroundColor: thirdLineColor,
                     .paragraphStyle: truncPara
                 ]
             )
@@ -814,7 +843,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
 
         // Bottom Footer
         let openShort = latestOpeningName.isEmpty ? "實戰同步" : latestOpeningName
-        let defaultFooter = "[大螢幕巨型盤] · \(syncLabel) · \(netLabel) · \(openShort) · [播:掃描 | 快轉:換步]"
+        let speedTag = latestSearchTimeMs > 0 ? " · \(latestSearchTimeMs)ms" : ""
+        let defaultFooter = "[大螢幕巨型盤] · \(syncLabel) · \(netLabel)\(speedTag) · \(openShort) · [播:掃描 | 快轉:換步]"
         drawFooterStrip(rect: CGRect(x: 16, y: 589, width: size.width - 32, height: 22), defaultText: defaultFooter)
     }
 
@@ -939,11 +969,25 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
                 ]
             )
         } else {
-            NSString(string: "#1 \(pieceFullName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]").draw(
+            var mateTag = ""
+            if let mate = primary.mateInMoves {
+                let isMyMate = (latestPerspective == .white && mate > 0) || (latestPerspective == .black && mate < 0)
+                mateTag = isMyMate ? " [必殺M\(abs(mate))]" : " [敵殺M\(abs(mate))]"
+            }
+            let headColor: UIColor
+            if let mate = primary.mateInMoves {
+                let isMyMate = (latestPerspective == .white && mate > 0) || (latestPerspective == .black && mate < 0)
+                headColor = isMyMate
+                    ? UIColor(red: 1.0, green: 0.84, blue: 0.25, alpha: 1.0)
+                    : UIColor(red: 1.0, green: 0.50, blue: 0.48, alpha: 1.0)
+            } else {
+                headColor = UIColor.white
+            }
+            NSString(string: "#1 \(pieceFullName) \(primary.bestMove.coordinateDisplay) [\(primary.bestMove.san)]\(mateTag)").draw(
                 in: CGRect(x: padX, y: rect.minY + 10, width: innerW, height: 26),
                 withAttributes: [
                     .font: UIFont.systemFont(ofSize: compactForSplitLayout ? 18.5 : 22, weight: .heavy),
-                    .foregroundColor: UIColor.white,
+                    .foregroundColor: headColor,
                     .paragraphStyle: truncPara
                 ]
             )
@@ -983,6 +1027,9 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
         if latestIsKingInCheck {
             warnStr = "警示：國王被將軍中！受阻請按快轉換步"
             warnColor = UIColor(red: 1.0, green: 0.52, blue: 0.52, alpha: 1.0)
+        } else if !latestThreatSummary.isEmpty {
+            warnStr = latestThreatSummary
+            warnColor = UIColor(red: 1.0, green: 0.65, blue: 0.32, alpha: 1.0)
         } else if !latestPinnedSummary.isEmpty {
             warnStr = "牽制：\(latestPinnedSummary)"
             warnColor = UIColor(red: 1.0, green: 0.76, blue: 0.36, alpha: 1.0)
@@ -990,7 +1037,8 @@ final class PiPOverlayManager: NSObject, ObservableObject, AVPictureInPictureCon
             warnStr = "警訊：目前 \(latestHangingCount) 枚友子受威脅"
             warnColor = UIColor(red: 1.0, green: 0.68, blue: 0.40, alpha: 1.0)
         } else {
-            warnStr = "防封思考 \(latestThinkRange.isEmpty ? "2-4秒" : latestThinkRange) · 來源 \(latestAnalysis?.engineSource ?? "GM庫")"
+            let speedStr = latestSearchTimeMs > 0 ? " · \(latestSearchTimeMs)ms" : ""
+            warnStr = "防封思考 \(latestThinkRange.isEmpty ? "2-4秒" : latestThinkRange)\(speedStr) · \(latestAnalysis?.engineSource ?? "GM庫")"
             warnColor = UIColor(white: 0.70, alpha: 1.0)
         }
         NSString(string: warnStr).draw(

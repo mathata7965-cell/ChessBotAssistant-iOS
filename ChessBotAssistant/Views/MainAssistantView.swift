@@ -164,8 +164,12 @@ struct MainAssistantView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                             }
 
-                            // King Check & Pin Alert Bar (Diagnoses why a piece cannot move due to the King)
-                            if viewModel.isBoardDetected && (viewModel.tacticalRadar.isKingInCheck || !viewModel.tacticalRadar.pinnedPieces.isEmpty) {
+                            // King Check, Pin & Immediate Threat Alert Bar
+                            if viewModel.isBoardDetected && (
+                                viewModel.tacticalRadar.isKingInCheck ||
+                                !viewModel.tacticalRadar.pinnedPieces.isEmpty ||
+                                (viewModel.threatRadarEnabled && viewModel.tacticalRadar.immediateThreat != nil)
+                            ) {
                                 kingSafetyAndPinAlertBar
                             }
 
@@ -367,6 +371,7 @@ struct MainAssistantView: View {
                                 },
                                 onSelectPV: { line in
                                     highlightedPVIndex = line.multipvIndex
+                                    viewModel.selectPreviewPVLine(line)
                                 },
                                 onPlayPV: { line in
                                     viewModel.playPVLine(line)
@@ -728,25 +733,95 @@ struct MainAssistantView: View {
                 )
 
                 InteractiveChessBoardView(
-                    boardState: viewModel.boardState,
+                    boardState: viewModel.displayedBoardState,
                     perspective: viewModel.perspective,
-                    selectedSquare: viewModel.selectedSquare,
-                    legalTargets: viewModel.legalTargetsForSelection,
-                    lastMove: viewModel.lastMove,
-                    pvLines: activeLines,
-                    showAutoHintArrows: viewModel.engineService.autoHintEnabled && !viewModel.isWaitingForOpponentReply,
+                    selectedSquare: viewModel.previewPlyOffset == 0 ? viewModel.selectedSquare : nil,
+                    legalTargets: viewModel.previewPlyOffset == 0 ? viewModel.legalTargetsForSelection : [],
+                    lastMove: viewModel.displayedLastMove,
+                    pvLines: viewModel.previewPlyOffset == 0 ? activeLines : [],
+                    showAutoHintArrows: viewModel.previewPlyOffset == 0 && viewModel.engineService.autoHintEnabled && !viewModel.isWaitingForOpponentReply,
                     highlightedPVIndex: highlightedPVIndex,
                     coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
                     isSafetyLocked: viewModel.isFairPlaySafetyLocked,
-                    hangingSquares: Set(viewModel.tacticalRadar.hangingFriendlySquares),
+                    hangingSquares: viewModel.previewPlyOffset == 0 ? Set(viewModel.tacticalRadar.hangingFriendlySquares) : [],
                     showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
                     boardTheme: viewModel.boardTheme,
                     onTapSquare: { square in
+                        guard viewModel.previewPlyOffset == 0 else {
+                            viewModel.resetPreviewToLive()
+                            return
+                        }
                         viewModel.tapSquare(square)
                     }
                 )
             }
             .aspectRatio(1.09, contentMode: .fit)
+
+            // Interactive PV Continuation Stepper
+            if viewModel.previewMaxPlies > 0 && !viewModel.isFairPlaySafetyLocked && !viewModel.isWaitingForOpponentReply && !viewModel.engineService.coachPieceOnlyHintMode {
+                HStack(spacing: 6) {
+                    Button {
+                        viewModel.stepPreviewBackward()
+                    } label: {
+                        Label("上一步", systemImage: "chevron.left")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(Color.white.opacity(viewModel.previewPlyOffset > 0 ? 0.12 : 0.04))
+                            .foregroundColor(viewModel.previewPlyOffset > 0 ? .white : Color(white: 0.42))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .disabled(viewModel.previewPlyOffset == 0)
+
+                    Spacer()
+
+                    if viewModel.previewPlyOffset == 0 {
+                        Text("推演後續變化 (線#\(viewModel.activePreviewLine?.multipvIndex ?? 1) · 共 \(viewModel.previewMaxPlies) 手)")
+                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.72))
+                    } else {
+                        Text("推演第 \(viewModel.previewPlyOffset)/\(viewModel.previewMaxPlies) 手: \(viewModel.previewStepMoveLabel)")
+                            .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                            .foregroundColor(.yellow)
+                    }
+
+                    Spacer()
+
+                    if viewModel.previewPlyOffset > 0 {
+                        Button {
+                            viewModel.resetPreviewToLive()
+                        } label: {
+                            Text("回實戰")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.cyan.opacity(0.20))
+                                .foregroundColor(.cyan)
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                        }
+                    }
+
+                    Button {
+                        viewModel.stepPreviewForward()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text("下一步")
+                            Image(systemName: "chevron.right")
+                        }
+                        .font(.system(size: 10.5, weight: .bold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(viewModel.previewPlyOffset < viewModel.previewMaxPlies ? accentGreen.opacity(0.22) : Color.white.opacity(0.04))
+                        .foregroundColor(viewModel.previewPlyOffset < viewModel.previewMaxPlies ? accentGreen : Color(white: 0.42))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .disabled(viewModel.previewPlyOffset >= viewModel.previewMaxPlies)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+            }
 
             // Big-Screen Overlay Modes Quick Switch Bar
             HStack(spacing: 6) {
@@ -806,6 +881,9 @@ struct MainAssistantView: View {
 
     private var kingSafetyAndPinAlertBar: some View {
         let radar = viewModel.tacticalRadar
+        let activeThreat = viewModel.threatRadarEnabled ? radar.immediateThreat : nil
+        let isUrgent = radar.isKingInCheck || (activeThreat?.severity ?? 0) >= 2
+
         return VStack(alignment: .leading, spacing: 5) {
             if radar.isKingInCheck {
                 HStack(spacing: 6) {
@@ -816,6 +894,18 @@ struct MainAssistantView: View {
                         ? ""
                         : "（攻擊源：\(radar.checkingDescriptions.joined(separator: "、"))）"
                     Text("國王正被將軍\(checkerText)，必須優先走解將安全步")
+                        .font(.caption2.bold())
+                        .foregroundColor(.white)
+                    Spacer()
+                }
+            }
+
+            if let threat = activeThreat {
+                HStack(spacing: 6) {
+                    Image(systemName: threat.severity >= 3 ? "bolt.shield.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption.bold())
+                        .foregroundColor(threat.severity >= 2 ? Color(red: 1.0, green: 0.45, blue: 0.42) : .orange)
+                    Text(threat.summary)
                         .font(.caption2.bold())
                         .foregroundColor(.white)
                     Spacer()
@@ -838,11 +928,11 @@ struct MainAssistantView: View {
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(radar.isKingInCheck ? Color.red.opacity(0.18) : Color.orange.opacity(0.14))
+                .fill(isUrgent ? Color.red.opacity(0.18) : Color.orange.opacity(0.14))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke((radar.isKingInCheck ? Color.red : Color.orange).opacity(0.55), lineWidth: 1)
+                .stroke((isUrgent ? Color.red : Color.orange).opacity(0.55), lineWidth: 1)
         )
     }
 
@@ -1301,31 +1391,98 @@ private struct FullScreenTacticalBoardView: View {
     }
 
     private func boardBlock(activeLines: [PVLine]) -> some View {
-        HStack(alignment: .center, spacing: 8) {
-            EvalBarView(
-                analysis: viewModel.engineService.currentAnalysis,
-                perspective: viewModel.perspective,
-                isAnalyzing: viewModel.engineService.isAnalyzing
-            )
+        VStack(spacing: 6) {
+            HStack(alignment: .center, spacing: 8) {
+                EvalBarView(
+                    analysis: viewModel.engineService.currentAnalysis,
+                    perspective: viewModel.perspective,
+                    isAnalyzing: viewModel.engineService.isAnalyzing
+                )
 
-            InteractiveChessBoardView(
-                boardState: viewModel.boardState,
-                perspective: viewModel.perspective,
-                selectedSquare: viewModel.selectedSquare,
-                legalTargets: viewModel.legalTargetsForSelection,
-                lastMove: viewModel.lastMove,
-                pvLines: activeLines,
-                showAutoHintArrows: viewModel.engineService.autoHintEnabled && !viewModel.isWaitingForOpponentReply,
-                highlightedPVIndex: highlightedPVIndex,
-                coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
-                isSafetyLocked: viewModel.isFairPlaySafetyLocked,
-                hangingSquares: Set(viewModel.tacticalRadar.hangingFriendlySquares),
-                showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
-                boardTheme: viewModel.boardTheme,
-                onTapSquare: { square in
-                    viewModel.tapSquare(square)
+                InteractiveChessBoardView(
+                    boardState: viewModel.displayedBoardState,
+                    perspective: viewModel.perspective,
+                    selectedSquare: viewModel.previewPlyOffset == 0 ? viewModel.selectedSquare : nil,
+                    legalTargets: viewModel.previewPlyOffset == 0 ? viewModel.legalTargetsForSelection : [],
+                    lastMove: viewModel.displayedLastMove,
+                    pvLines: viewModel.previewPlyOffset == 0 ? activeLines : [],
+                    showAutoHintArrows: viewModel.previewPlyOffset == 0 && viewModel.engineService.autoHintEnabled && !viewModel.isWaitingForOpponentReply,
+                    highlightedPVIndex: highlightedPVIndex,
+                    coachPieceOnlyMode: viewModel.engineService.coachPieceOnlyHintMode,
+                    isSafetyLocked: viewModel.isFairPlaySafetyLocked,
+                    hangingSquares: viewModel.previewPlyOffset == 0 ? Set(viewModel.tacticalRadar.hangingFriendlySquares) : [],
+                    showOpponentReplyArrow: viewModel.engineService.showOpponentReplyArrow,
+                    boardTheme: viewModel.boardTheme,
+                    onTapSquare: { square in
+                        guard viewModel.previewPlyOffset == 0 else {
+                            viewModel.resetPreviewToLive()
+                            return
+                        }
+                        viewModel.tapSquare(square)
+                    }
+                )
+            }
+
+            if viewModel.previewMaxPlies > 0 && !viewModel.isFairPlaySafetyLocked && !viewModel.isWaitingForOpponentReply && !viewModel.engineService.coachPieceOnlyHintMode {
+                HStack(spacing: 8) {
+                    Button {
+                        viewModel.stepPreviewBackward()
+                    } label: {
+                        Label("上一步", systemImage: "chevron.left")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.white.opacity(viewModel.previewPlyOffset > 0 ? 0.14 : 0.05))
+                            .foregroundColor(viewModel.previewPlyOffset > 0 ? .white : Color(white: 0.45))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .disabled(viewModel.previewPlyOffset == 0)
+
+                    Spacer()
+
+                    Text(viewModel.previewPlyOffset == 0
+                         ? "續著推演 (共 \(viewModel.previewMaxPlies) 手)"
+                         : "推演 \(viewModel.previewPlyOffset)/\(viewModel.previewMaxPlies): \(viewModel.previewStepMoveLabel)")
+                        .font(.caption.bold().monospaced())
+                        .foregroundColor(viewModel.previewPlyOffset == 0 ? Color(white: 0.78) : .yellow)
+
+                    Spacer()
+
+                    if viewModel.previewPlyOffset > 0 {
+                        Button {
+                            viewModel.resetPreviewToLive()
+                        } label: {
+                            Text("回實戰")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.cyan.opacity(0.22))
+                                .foregroundColor(.cyan)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+
+                    Button {
+                        viewModel.stepPreviewForward()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text("下一步")
+                            Image(systemName: "chevron.right")
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(viewModel.previewPlyOffset < viewModel.previewMaxPlies ? accentGreen.opacity(0.25) : Color.white.opacity(0.05))
+                        .foregroundColor(viewModel.previewPlyOffset < viewModel.previewMaxPlies ? accentGreen : Color(white: 0.45))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .disabled(viewModel.previewPlyOffset >= viewModel.previewMaxPlies)
                 }
-            )
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
         }
     }
 
@@ -1353,6 +1510,18 @@ private struct FullScreenTacticalBoardView: View {
                         Text("評估 \(evalStr)")
                             .font(.headline.monospaced())
                             .foregroundColor(.white)
+
+                        if let mate = primary?.mateInMoves {
+                            let isMyMate = (viewModel.perspective == .white && mate > 0) || (viewModel.perspective == .black && mate < 0)
+                            Text(isMyMate ? "[必殺M\(abs(mate))]" : "[敵殺M\(abs(mate))]")
+                                .font(.caption2.bold().monospaced())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(isMyMate ? Color(red: 1.0, green: 0.78, blue: 0.22) : Color(red: 0.92, green: 0.28, blue: 0.30))
+                                .foregroundColor(isMyMate ? Color(red: 0.14, green: 0.08, blue: 0.0) : .white)
+                                .clipShape(Capsule())
+                        }
+
                         Spacer()
                         Text("勝\(wdl.win)% 和\(wdl.draw)% 負\(wdl.loss)%")
                             .font(.caption.bold().monospacedDigit())
@@ -1375,6 +1544,22 @@ private struct FullScreenTacticalBoardView: View {
                 }
             }
 
+            if viewModel.threatRadarEnabled, let threat = viewModel.tacticalRadar.immediateThreat {
+                HStack(spacing: 6) {
+                    Image(systemName: threat.severity >= 3 ? "bolt.shield.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption.bold())
+                        .foregroundColor(threat.severity >= 2 ? Color(red: 1.0, green: 0.45, blue: 0.42) : .orange)
+                    Text(threat.summary)
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background((threat.severity >= 2 ? Color.red : Color.orange).opacity(0.20))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
             Divider().background(Color.white.opacity(0.10))
 
             if viewModel.isFairPlaySafetyLocked {
@@ -1393,11 +1578,22 @@ private struct FullScreenTacticalBoardView: View {
                     ? viewModel.boardState.explainMoveTactics(primary.bestMove)
                     : primary.tacticalReason
                 let replyStr = (viewModel.engineService.showOpponentReplyArrow ? primary.predictedOpponentReply?.san : nil) ?? "-"
+                let msTag = (viewModel.engineService.currentAnalysis?.searchTimeMs ?? 0) > 0
+                    ? " · \(viewModel.engineService.currentAnalysis!.searchTimeMs)ms"
+                    : ""
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("#1 \(pieceFullName)  \(primary.bestMove.coordinateDisplay)  [\(primary.bestMove.san)]")
-                        .font(.title3.bold())
-                        .foregroundColor(.white)
+                    HStack {
+                        Text("#1 \(pieceFullName)  \(primary.bestMove.coordinateDisplay)  [\(primary.bestMove.san)]")
+                            .font(.title3.bold())
+                            .foregroundColor(.white)
+                        Spacer()
+                        if !msTag.isEmpty {
+                            Text("\(viewModel.engineService.currentAnalysis?.engineSource ?? "引擎")\(msTag)")
+                                .font(.caption2.bold().monospaced())
+                                .foregroundColor(.cyan)
+                        }
+                    }
 
                     HStack(spacing: 8) {
                         Text("螢幕位置：\(posHint)")

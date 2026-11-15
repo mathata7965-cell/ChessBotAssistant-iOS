@@ -76,6 +76,25 @@ struct MultiPVPanelView: View {
                     .foregroundColor(Color(white: 0.88))
                 }
 
+                if isBoardDetected, let analysis, analysis.searchTimeMs > 0 {
+                    let nodeStr: String = {
+                        if analysis.nodesSearched >= 1000 {
+                            return " · \(analysis.nodesSearched / 1000)k點"
+                        } else if analysis.nodesSearched > 0 {
+                            return " · \(analysis.nodesSearched)點"
+                        } else {
+                            return ""
+                        }
+                    }()
+                    Text("\(analysis.searchTimeMs)ms\(nodeStr)")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.cyan.opacity(0.12))
+                        .foregroundColor(.cyan)
+                        .clipShape(Capsule())
+                }
+
                 Spacer()
 
                 if !isBoardDetected {
@@ -274,21 +293,42 @@ struct MultiPVPanelView: View {
 
                 Spacer(minLength: 4)
 
-                Text(line.formattedScore)
-                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        line.scoreCentipawns >= 0
-                            ? Color.white.opacity(0.92)
-                            : Color(white: 0.22)
-                    )
-                    .foregroundColor(
-                        line.scoreCentipawns >= 0
-                            ? Color(red: 0.10, green: 0.12, blue: 0.14)
-                            : .white
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                VStack(alignment: .trailing, spacing: 3) {
+                    if let mate = line.mateInMoves {
+                        let isMyMate = (perspective == .white && mate > 0) || (perspective == .black && mate < 0)
+                        Text(isMyMate ? "[必殺 M\(abs(mate))]" : "[敵殺 M\(abs(mate))]")
+                            .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(
+                                isMyMate
+                                    ? Color(red: 1.0, green: 0.78, blue: 0.22)
+                                    : Color(red: 0.92, green: 0.28, blue: 0.30)
+                            )
+                            .foregroundColor(
+                                isMyMate
+                                    ? Color(red: 0.14, green: 0.08, blue: 0.0)
+                                    : .white
+                            )
+                            .clipShape(Capsule())
+                    }
+
+                    Text(line.formattedScore)
+                        .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            line.scoreCentipawns >= 0
+                                ? Color.white.opacity(0.92)
+                                : Color(white: 0.22)
+                        )
+                        .foregroundColor(
+                            line.scoreCentipawns >= 0
+                                ? Color(red: 0.10, green: 0.12, blue: 0.14)
+                                : .white
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
             }
 
             // Phase-calibrated WDL Bar (Win / Draw / Loss)
@@ -435,6 +475,25 @@ struct MultiPVPanelView: View {
                     }
 
                     Spacer()
+
+                    if let mate = line.mateInMoves {
+                        let isMyMate = (perspective == .white && mate > 0) || (perspective == .black && mate < 0)
+                        Text(isMyMate ? "[必殺M\(abs(mate))]" : "[敵殺M\(abs(mate))]")
+                            .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(
+                                isMyMate
+                                    ? Color(red: 1.0, green: 0.78, blue: 0.22)
+                                    : Color(red: 0.92, green: 0.28, blue: 0.30)
+                            )
+                            .foregroundColor(
+                                isMyMate
+                                    ? Color(red: 0.14, green: 0.08, blue: 0.0)
+                                    : .white
+                            )
+                            .clipShape(Capsule())
+                    }
 
                     Text(line.formattedScore)
                         .font(.system(size: 11.5, weight: .bold, design: .monospaced))
