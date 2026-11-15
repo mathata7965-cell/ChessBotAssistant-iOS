@@ -1004,15 +1004,6 @@ final class AssistantViewModel: ObservableObject {
                CACurrentMediaTime() - lastAcceptedMoveTime < 1.2 {
                 return
             }
-
-            // Strict 2-frame stability gate for ALL board transitions (no mid-animation single-frame bypass)
-            if pendingBroadcastKey == placementKey {
-                pendingBroadcastCount += 1
-            } else {
-                pendingBroadcastKey = placementKey
-                pendingBroadcastCount = 1
-            }
-            guard pendingBroadcastCount >= 2 else { return }
         }
         pendingBroadcastKey = nil
         pendingBroadcastCount = 0
@@ -1043,6 +1034,8 @@ final class AssistantViewModel: ObservableObject {
                 isWaitingForOpponentReply = true
                 engineService.clearAnalysis()
                 syncPiPContent()
+                let boardAfterOurMove = ownProbe.applyingRaw(ownMove)
+                engineService.ponderWhileWaitingForOpponent(boardAfterOurMove: boardAfterOurMove)
                 return
             } else {
                 lastMove = matchingOppMove

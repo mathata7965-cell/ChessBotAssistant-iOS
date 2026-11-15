@@ -268,6 +268,23 @@ struct ChessMove: Identifiable, Codable, Equatable, Hashable, Sendable {
 
     var id: String { uci }
 
+    var packed: UInt16 {
+        let promoBits: UInt16
+        switch promotion {
+        case .none: promoBits = 0
+        case .some(.knight): promoBits = 1
+        case .some(.bishop): promoBits = 2
+        case .some(.rook): promoBits = 3
+        case .some(.queen): promoBits = 4
+        default: promoBits = 0
+        }
+        return UInt16((from.row & 7) << 12)
+             | UInt16((from.col & 7) << 9)
+             | UInt16((to.row & 7) << 6)
+             | UInt16((to.col & 7) << 3)
+             | promoBits
+    }
+
     var uci: String {
         from.algebraic + to.algebraic + (promotion?.promotionUCI ?? "")
     }

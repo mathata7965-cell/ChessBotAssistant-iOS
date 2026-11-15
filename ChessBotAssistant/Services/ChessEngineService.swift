@@ -24,9 +24,35 @@ final class ChessEngineService: ObservableObject {
     @Published private(set) var lastErrorMessage: String?
 
     private var activeTask: Task<Void, Never>?
+    private var ponderTask: Task<Void, Never>?
     private var cloudCache: [String: EngineAnalysisResult] = [:]
+    private var localCache: [String: EngineAnalysisResult] = [:]
     private var lastRawAnalysis: EngineAnalysisResult?
     private var lastRawPositionKey: String?
+
+    private let fastURLSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 1.2
+        config.timeoutIntervalForResource = 1.8
+        config.waitsForConnectivity = false
+        config.httpMaximumConnectionsPerHost = 6
+        config.requestCachePolicy = .useProtocolCachePolicy
+        return URLSession(configuration: config)
+    }()
+
+    private func storeCloudCache(_ result: EngineAnalysisResult, forKey key: String) {
+        if cloudCache.count >= 128 {
+            cloudCache.removeAll(keepingCapacity: true)
+        }
+        cloudCache[key] = result
+    }
+
+    private func storeLocalCache(_ result: EngineAnalysisResult, forKey key: String) {
+        if localCache.count >= 128 {
+            localCache.removeAll(keepingCapacity: true)
+        }
+        localCache[key] = result
+    }
 
     @discardableResult
     func reapplyPlayStyle(for board: ChessBoardState) -> Bool {
@@ -45,12 +71,16 @@ final class ChessEngineService: ObservableObject {
     func cancelAnalysis() {
         activeTask?.cancel()
         activeTask = nil
+        ponderTask?.cancel()
+        ponderTask = nil
         isAnalyzing = false
     }
 
     func clearAnalysis() {
         activeTask?.cancel()
         activeTask = nil
+        ponderTask?.cancel()
+        ponderTask = nil
         isAnalyzing = false
         currentAnalysis = nil
         lastRawAnalysis = nil
@@ -59,6 +89,8 @@ final class ChessEngineService: ObservableObject {
 
     func analyze(board: ChessBoardState, preserveExcludedMoves: Bool = false) {
         activeTask?.cancel()
+        ponderTask?.cancel()
+        ponderTask = nil
         lastErrorMessage = nil
 
         if !preserveExcludedMoves {
@@ -127,9 +159,12 @@ final class ChessEngineService: ObservableObject {
             )
             if !allowCloud || safeBook.lines.count >= requestedPV {
                 isAnalyzing = false
+                ponderOpponentReplies(from: board, analysis: currentAnalysis)
                 return
             }
         }
+
+        let prefetchedLocal = localCache[cacheKey]
 
         if allowCloud, let cached = cloudCache[cacheKey] {
             let safeCached = Self.enforceSafeLines(cached, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
@@ -144,6 +179,25 @@ final class ChessEngineService: ObservableObject {
                     board: board
                 )
                 isAnalyzing = false
+                ponderOpponentReplies(from: board, analysis: currentAnalysis)
+                return
+            }
+        }
+
+        if !allowCloud, let cachedLocal = prefetchedLocal {
+            let safeCached = Self.enforceSafeLines(cachedLocal, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
+            if !safeCached.lines.isEmpty {
+                lastRawAnalysis = safeCached
+                lastRawPositionKey = board.positionKey
+                currentAnalysis = Self.applyPlayStyle(
+                    activeStyle,
+                    botProfile: activeBotProfile,
+                    humanTargetElo: activeElo,
+                    to: safeCached,
+                    board: board
+                )
+                isAnalyzing = false
+                ponderOpponentReplies(from: board, analysis: currentAnalysis)
                 return
             }
         }
@@ -163,52 +217,76 @@ final class ChessEngineService: ObservableObject {
                     )
                 }
 
-                let localResult = await Task.detached(priority: .userInitiated) {
-                    LocalAlphaBetaEngine.analyze(
-                        board: board,
-                        maxDepth: min(requestedDepth, 6),
-                        multiPV: requestedPV,
-                        timeBudgetSeconds: 0.45,
-                        isZeroNetworkMode: isZeroNetwork,
-                        excludedUCIs: excludedSet
-                    )
-                }.value
+                let localTask: Task<EngineAnalysisResult, Never>? = (prefetchedLocal?.depthReached ?? 0) >= 6
+                    ? nil
+                    : Task.detached(priority: .userInitiated) {
+                        LocalAlphaBetaEngine.analyze(
+                            board: board,
+                            maxDepth: min(requestedDepth, 10),
+                            multiPV: requestedPV,
+                            timeBudgetSeconds: 0.28,
+                            isZeroNetworkMode: isZeroNetwork,
+                            excludedUCIs: excludedSet
+                        )
+                    }
 
-                if Task.isCancelled {
-                    cloudTask.cancel()
-                    return
-                }
-
-                // Single-Commit Policy: wait up to 0.90s for Cloud Stockfish so UI never jumps local->cloud mid-turn
-                let timedCloud: EngineAnalysisResult? = await withTaskGroup(of: (isCloud: Bool, result: EngineAnalysisResult?).self) { group in
+                // Single-Commit Policy: race Cloud (up to 0.42s) simultaneously with LocalAlphaBetaEngine (0.28s)
+                let raceOutcome: (timedOut: Bool, result: EngineAnalysisResult?) = await withTaskGroup(
+                    of: (timedOut: Bool, result: EngineAnalysisResult?).self
+                ) { group in
                     group.addTask {
                         let val = await cloudTask.value
-                        return (true, val)
+                        return (false, val)
                     }
                     group.addTask {
-                        try? await Task.sleep(nanoseconds: 900_000_000)
-                        return (false, nil)
+                        try? await Task.sleep(nanoseconds: 420_000_000)
+                        return (true, nil)
                     }
                     while let first = await group.next() {
                         group.cancelAll()
-                        return first.isCloud ? first.result : nil
+                        return first
                     }
-                    return nil
+                    return (true, nil)
                 }
 
                 if Task.isCancelled {
                     cloudTask.cancel()
+                    localTask?.cancel()
                     return
                 }
 
-                if let rawCloud = timedCloud {
-                    let mergedCloud = Self.mergeCloudWithLocalFallback(
-                        cloud: rawCloud,
-                        localLines: localResult.lines,
-                        multiPV: requestedPV
-                    )
-                    self.cloudCache[cacheKey] = mergedCloud
-                    let safeCloud = Self.enforceSafeLines(mergedCloud, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
+                if let rawCloud = raceOutcome.result, !rawCloud.lines.isEmpty {
+                    let finalCloud: EngineAnalysisResult
+                    if rawCloud.lines.count < requestedPV {
+                        let localFallback: EngineAnalysisResult
+                        if let pre = prefetchedLocal {
+                            localFallback = pre
+                            localTask?.cancel()
+                        } else if let localTask {
+                            localFallback = await localTask.value
+                        } else {
+                            localFallback = LocalAlphaBetaEngine.analyze(
+                                board: board,
+                                maxDepth: min(requestedDepth, 8),
+                                multiPV: requestedPV,
+                                timeBudgetSeconds: 0.18,
+                                isZeroNetworkMode: isZeroNetwork,
+                                excludedUCIs: excludedSet
+                            )
+                        }
+                        if Task.isCancelled { return }
+                        finalCloud = Self.mergeCloudWithLocalFallback(
+                            cloud: rawCloud,
+                            localLines: localFallback.lines,
+                            multiPV: requestedPV
+                        )
+                    } else {
+                        localTask?.cancel()
+                        finalCloud = rawCloud
+                    }
+
+                    self.storeCloudCache(finalCloud, forKey: cacheKey)
+                    let safeCloud = Self.enforceSafeLines(finalCloud, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
                     self.lastRawAnalysis = safeCloud
                     self.lastRawPositionKey = board.positionKey
                     self.currentAnalysis = Self.applyPlayStyle(
@@ -219,8 +297,47 @@ final class ChessEngineService: ObservableObject {
                         board: board
                     )
                 } else {
-                    cloudTask.cancel()
+                    let localResult: EngineAnalysisResult
+                    if let pre = prefetchedLocal, pre.depthReached >= 6 {
+                        localResult = pre
+                        localTask?.cancel()
+                    } else if let localTask {
+                        localResult = await localTask.value
+                    } else {
+                        localResult = prefetchedLocal ?? LocalAlphaBetaEngine.analyze(
+                            board: board,
+                            maxDepth: min(requestedDepth, 10),
+                            multiPV: requestedPV,
+                            timeBudgetSeconds: 0.28,
+                            isZeroNetworkMode: isZeroNetwork,
+                            excludedUCIs: excludedSet
+                        )
+                    }
+
+                    if Task.isCancelled {
+                        cloudTask.cancel()
+                        return
+                    }
+
+                    // Silently warm cloudCache in background if 0.42s cutoff fired (never mutates currentAnalysis mid-turn)
+                    if raceOutcome.timedOut {
+                        Task { [weak self] in
+                            guard let self else { return }
+                            if let lateCloud = await cloudTask.value, !lateCloud.lines.isEmpty {
+                                let mergedLate = Self.mergeCloudWithLocalFallback(
+                                    cloud: lateCloud,
+                                    localLines: localResult.lines,
+                                    multiPV: requestedPV
+                                )
+                                self.storeCloudCache(mergedLate, forKey: cacheKey)
+                            }
+                        }
+                    } else {
+                        cloudTask.cancel()
+                    }
+
                     let safeLocal = Self.enforceSafeLines(localResult, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
+                    self.storeLocalCache(safeLocal, forKey: cacheKey)
                     self.lastRawAnalysis = safeLocal
                     self.lastRawPositionKey = board.positionKey
                     self.currentAnalysis = Self.applyPlayStyle(
@@ -235,7 +352,7 @@ final class ChessEngineService: ObservableObject {
                 let localResult = await Task.detached(priority: .userInitiated) {
                     LocalAlphaBetaEngine.analyze(
                         board: board,
-                        maxDepth: min(requestedDepth, 6),
+                        maxDepth: min(requestedDepth, 12),
                         multiPV: requestedPV,
                         timeBudgetSeconds: 0.75,
                         isZeroNetworkMode: isZeroNetwork,
@@ -246,6 +363,7 @@ final class ChessEngineService: ObservableObject {
                 if Task.isCancelled { return }
 
                 let safeLocal = Self.enforceSafeLines(localResult, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
+                self.storeLocalCache(safeLocal, forKey: cacheKey)
                 self.lastRawAnalysis = safeLocal
                 self.lastRawPositionKey = board.positionKey
                 self.currentAnalysis = Self.applyPlayStyle(
@@ -259,6 +377,97 @@ final class ChessEngineService: ObservableObject {
 
             if !Task.isCancelled {
                 self.isAnalyzing = false
+                self.ponderOpponentReplies(from: board, analysis: self.currentAnalysis)
+            }
+        }
+    }
+
+    func ponderOpponentReplies(from board: ChessBoardState, analysis: EngineAnalysisResult?) {
+        guard autoHintEnabled, let topLine = analysis?.lines.first else { return }
+        let afterOurMove = board.applyingRaw(topLine.bestMove)
+        if let oppReply = topLine.predictedOpponentReply {
+            let nextOurBoard = afterOurMove.applyingRaw(oppReply)
+            startPonderTask(targetBoards: [nextOurBoard], seedBoard: nil)
+        } else {
+            startPonderTask(targetBoards: [], seedBoard: afterOurMove)
+        }
+    }
+
+    func ponderWhileWaitingForOpponent(boardAfterOurMove: ChessBoardState) {
+        guard autoHintEnabled else { return }
+        startPonderTask(targetBoards: [], seedBoard: boardAfterOurMove)
+    }
+
+    private func startPonderTask(targetBoards: [ChessBoardState], seedBoard: ChessBoardState?) {
+        ponderTask?.cancel()
+        ponderTask = nil
+
+        let requestedDepth = max(4, min(18, targetDepth))
+        let requestedPV = max(1, min(3, multiPVCount))
+        let isZeroNetwork = zeroNetworkIsolationMode
+        let allowCloud = useCloudStockfish && !isZeroNetwork
+
+        ponderTask = Task { [weak self] in
+            guard let self else { return }
+            await Task.yield()
+            if Task.isCancelled { return }
+
+            var boardsToPonder = targetBoards
+            if boardsToPonder.isEmpty, let seed = seedBoard, !seed.legalMoves(includeFormattedSAN: false).isEmpty {
+                let oppAnalysis = await Task.detached(priority: .utility) {
+                    LocalAlphaBetaEngine.analyze(
+                        board: seed,
+                        maxDepth: 6,
+                        multiPV: 2,
+                        timeBudgetSeconds: 0.22,
+                        isZeroNetworkMode: true,
+                        excludedUCIs: []
+                    )
+                }.value
+                if Task.isCancelled { return }
+                boardsToPonder = oppAnalysis.lines.prefix(2).map { seed.applyingRaw($0.bestMove) }
+            }
+
+            for candidate in boardsToPonder.prefix(2) {
+                if Task.isCancelled { return }
+                guard !candidate.legalMoves(includeFormattedSAN: false).isEmpty else { continue }
+
+                let pKey = "\(candidate.positionKey)|d\(requestedDepth)|pv\(requestedPV)"
+
+                if self.localCache[pKey] == nil {
+                    let ponderedLocal = await Task.detached(priority: .utility) {
+                        LocalAlphaBetaEngine.analyze(
+                            board: candidate,
+                            maxDepth: min(requestedDepth, 10),
+                            multiPV: requestedPV,
+                            timeBudgetSeconds: 0.42,
+                            isZeroNetworkMode: isZeroNetwork,
+                            excludedUCIs: []
+                        )
+                    }.value
+                    if Task.isCancelled { return }
+                    if !ponderedLocal.lines.isEmpty {
+                        self.storeLocalCache(ponderedLocal, forKey: pKey)
+                    }
+                }
+
+                if allowCloud && self.cloudCache[pKey] == nil {
+                    if let ponderedCloud = await self.fetchCloudAnalysis(
+                        board: candidate,
+                        requestedDepth: requestedDepth,
+                        multiPV: requestedPV,
+                        addHumanJitter: false
+                    ), !ponderedCloud.lines.isEmpty {
+                        if Task.isCancelled { return }
+                        let localLines = self.localCache[pKey]?.lines ?? []
+                        let merged = Self.mergeCloudWithLocalFallback(
+                            cloud: ponderedCloud,
+                            localLines: localLines,
+                            multiPV: requestedPV
+                        )
+                        self.storeCloudCache(merged, forKey: pKey)
+                    }
+                }
             }
         }
     }
@@ -390,45 +599,52 @@ final class ChessEngineService: ObservableObject {
         addHumanJitter: Bool = false
     ) async -> EngineAnalysisResult? {
         if addHumanJitter {
-            let jitterNs = UInt64(Int.random(in: 60...160)) * 1_000_000
+            let jitterNs = UInt64(Int.random(in: 45...120)) * 1_000_000
             try? await Task.sleep(nanoseconds: jitterNs)
             if Task.isCancelled { return nil }
         }
         let sfDepth = min(max(requestedDepth, 10), 15)
-        async let lichessTask = queryLichessCloudEval(board: board, multiPV: multiPV)
-        async let sfOnlineTask = queryStockfishOnline(board: board, depth: sfDepth)
+        let fen = board.toFEN()
 
-        // Prefer Lichess Cloud Eval (supports Multi-PV natively)
-        if let lichessLines = await lichessTask, !lichessLines.lines.isEmpty {
-            return EngineAnalysisResult(
-                fen: board.toFEN(),
-                sideToMove: board.sideToMove,
-                lines: Array(lichessLines.lines.prefix(multiPV)),
-                depthReached: lichessLines.depth,
-                isCloudVerified: true,
-                engineSource: "Stockfish NNUE (Lichess Cloud)",
-                nodesSearched: lichessLines.knodes * 1000,
-                timestamp: Date()
-            )
+        return await withTaskGroup(of: EngineAnalysisResult?.self) { group in
+            group.addTask { [weak self] in
+                guard let self,
+                      let lichessLines = await self.queryLichessCloudEval(board: board, multiPV: multiPV),
+                      !lichessLines.lines.isEmpty else { return nil }
+                return EngineAnalysisResult(
+                    fen: fen,
+                    sideToMove: board.sideToMove,
+                    lines: Array(lichessLines.lines.prefix(multiPV)),
+                    depthReached: lichessLines.depth,
+                    isCloudVerified: true,
+                    engineSource: "Stockfish NNUE (Lichess Cloud)",
+                    nodesSearched: lichessLines.knodes * 1000,
+                    timestamp: Date()
+                )
+            }
+            group.addTask { [weak self] in
+                guard let self,
+                      let sfLine = await self.queryStockfishOnline(board: board, depth: sfDepth) else { return nil }
+                return EngineAnalysisResult(
+                    fen: fen,
+                    sideToMove: board.sideToMove,
+                    lines: [sfLine],
+                    depthReached: sfDepth,
+                    isCloudVerified: true,
+                    engineSource: "Stockfish 16 NNUE",
+                    nodesSearched: 0,
+                    timestamp: Date()
+                )
+            }
+
+            while let candidate = await group.next() {
+                if let valid = candidate, !valid.lines.isEmpty {
+                    group.cancelAll()
+                    return valid
+                }
+            }
+            return nil
         }
-
-        if Task.isCancelled { return nil }
-
-        // Fallback to stockfish.online API (already running in parallel)
-        if let sfLine = await sfOnlineTask {
-            return EngineAnalysisResult(
-                fen: board.toFEN(),
-                sideToMove: board.sideToMove,
-                lines: [sfLine],
-                depthReached: sfDepth,
-                isCloudVerified: true,
-                engineSource: "Stockfish 16 NNUE",
-                nodesSearched: 0,
-                timestamp: Date()
-            )
-        }
-
-        return nil
     }
 
     private func queryLichessCloudEval(board: ChessBoardState, multiPV: Int) async -> (lines: [PVLine], depth: Int, knodes: Int)? {
@@ -440,11 +656,11 @@ final class ChessEngineService: ObservableObject {
         ]
         guard let url = components.url else { return nil }
 
-        var req = URLRequest(url: url, timeoutInterval: 2.2)
+        var req = URLRequest(url: url, timeoutInterval: 1.0)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await fastURLSession.data(for: req)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
             let decoded = try JSONDecoder().decode(LichessCloudEvalResponse.self, from: data)
             let depth = decoded.depth ?? 20
@@ -495,10 +711,10 @@ final class ChessEngineService: ObservableObject {
         ]
         guard let url = components.url else { return nil }
 
-        let req = URLRequest(url: url, timeoutInterval: 4.0)
+        let req = URLRequest(url: url, timeoutInterval: 1.1)
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await fastURLSession.data(for: req)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
             let decoded = try JSONDecoder().decode(StockfishOnlineResponse.self, from: data)
             guard decoded.success else { return nil }
@@ -767,15 +983,99 @@ private struct StockfishOnlineResponse: Decodable {
 private enum LocalAlphaBetaEngine {
     private static let mateScore = 30000
 
-    // Middlegame & Endgame piece values
-    private static let mgValues: [PieceType: Int] = [
-        .pawn: 82, .knight: 337, .bishop: 365, .rook: 477, .queen: 1025, .king: 0
-    ]
-    private static let egValues: [PieceType: Int] = [
-        .pawn: 94, .knight: 281, .bishop: 297, .rook: 512, .queen: 936, .king: 0
-    ]
-    private static let phaseWeights: [PieceType: Int] = [
-        .pawn: 0, .knight: 1, .bishop: 1, .rook: 2, .queen: 4, .king: 0
+    @inline(__always)
+    private static func mgPieceValue(_ type: PieceType) -> Int {
+        switch type {
+        case .pawn: return 82
+        case .knight: return 337
+        case .bishop: return 365
+        case .rook: return 477
+        case .queen: return 1025
+        case .king: return 0
+        }
+    }
+
+    @inline(__always)
+    private static func egPieceValue(_ type: PieceType) -> Int {
+        switch type {
+        case .pawn: return 94
+        case .knight: return 281
+        case .bishop: return 297
+        case .rook: return 512
+        case .queen: return 936
+        case .king: return 0
+        }
+    }
+
+    @inline(__always)
+    private static func piecePhaseWeight(_ type: PieceType) -> Int {
+        switch type {
+        case .pawn, .king: return 0
+        case .knight, .bishop: return 1
+        case .rook: return 2
+        case .queen: return 4
+        }
+    }
+
+    @inline(__always)
+    private static func pieceBaseValue(_ type: PieceType) -> Int {
+        switch type {
+        case .pawn: return 100
+        case .knight: return 320
+        case .bishop: return 330
+        case .rook: return 500
+        case .queen: return 900
+        case .king: return 20000
+        }
+    }
+
+    private static let passedPawnBonus: [Int] = [0, 65, 45, 32, 22, 18, 12, 0]
+
+    private static let whitePassedMasks: [UInt64] = {
+        var masks = Array(repeating: UInt64(0), count: 64)
+        for r in 0..<8 {
+            for c in 0..<8 {
+                var m: UInt64 = 0
+                for ar in 0..<r {
+                    for fc in max(0, c - 1)...min(7, c + 1) {
+                        m |= (UInt64(1) &<< (ar * 8 + fc))
+                    }
+                }
+                masks[r * 8 + c] = m
+            }
+        }
+        return masks
+    }()
+
+    private static let blackPassedMasks: [UInt64] = {
+        var masks = Array(repeating: UInt64(0), count: 64)
+        for r in 0..<8 {
+            for c in 0..<8 {
+                var m: UInt64 = 0
+                for ar in (r + 1)..<8 {
+                    for fc in max(0, c - 1)...min(7, c + 1) {
+                        m |= (UInt64(1) &<< (ar * 8 + fc))
+                    }
+                }
+                masks[r * 8 + c] = m
+            }
+        }
+        return masks
+    }()
+
+    private static let whiteShieldFileMasks: [UInt64] = (0..<8).map { c in
+        (UInt64(1) &<< (5 * 8 + c)) | (UInt64(1) &<< (6 * 8 + c))
+    }
+
+    private static let blackShieldFileMasks: [UInt64] = (0..<8).map { c in
+        (UInt64(1) &<< (1 * 8 + c)) | (UInt64(1) &<< (2 * 8 + c))
+    }
+
+    private static let rootOpeningBonuses: [String: Int] = [
+        "e2e4": 12, "d2d4": 11, "f1b5": 9, "f1c4": 8,
+        "g1f3": 6, "b1c3": 5, "c2c4": 6,
+        "e7e5": 11, "d7d5": 10, "c7c5": 10, "g8f6": 6,
+        "e7e6": 6, "c7c6": 5
     ]
 
     // PeSTO Piece-Square Tables (White orientation, index 0 = rank 8, index 63 = rank 1)
@@ -913,46 +1213,100 @@ private enum LocalAlphaBetaEngine {
 
     private struct TTEntry {
         var key: UInt64 = 0
-        var depth: Int = -1
-        var score: Int = 0
+        var depth: Int8 = -1
+        var score: Int32 = 0
         var flag: UInt8 = 0
-        var bestUCI: String = ""
+        var generation: UInt8 = 0
+        var bestPacked: UInt16 = 0
     }
+
+    private final class PersistentTTStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [TTEntry] = Array(repeating: TTEntry(), count: 65_536)
+        private var currentGen: UInt8 = 1
+
+        func checkout() -> (entries: [TTEntry], generation: UInt8) {
+            lock.lock()
+            defer { lock.unlock() }
+            currentGen = currentGen &+ 1
+            if currentGen == 0 { currentGen = 1 }
+            return (entries, currentGen)
+        }
+
+        func commit(_ updated: [TTEntry], generation: UInt8) {
+            lock.lock()
+            defer { lock.unlock() }
+            for i in 0..<entries.count {
+                let cand = updated[i]
+                guard cand.generation == generation && cand.flag != 0 else { continue }
+                let cur = entries[i]
+                if cur.flag == 0 || cur.generation != generation || cand.depth >= cur.depth {
+                    entries[i] = cand
+                }
+            }
+        }
+    }
+
+    private static let sharedTT = PersistentTTStore()
 
     private final class SearchContext {
         var nodes: Int = 0
-        let deadline: Date
+        let deadline: CFAbsoluteTime
         var cancelled: Bool = false
-        var tt: [TTEntry] = Array(repeating: TTEntry(), count: 16_384)
-        var killers: [[String]] = Array(repeating: [], count: 32)
+        var tt: [TTEntry]
+        let generation: UInt8
+        var killers0: [UInt16] = Array(repeating: 0, count: 64)
+        var killers1: [UInt16] = Array(repeating: 0, count: 64)
+        var historyTable: [Int] = Array(repeating: 0, count: 8_192)
 
-        init(deadline: Date) {
+        init(deadline: CFAbsoluteTime, tt: [TTEntry], generation: UInt8) {
             self.deadline = deadline
+            self.tt = tt
+            self.generation = generation
         }
 
-        func recordKiller(_ uci: String, ply: Int) {
-            guard ply >= 0 && ply < killers.count else { return }
-            if killers[ply].first == uci { return }
-            killers[ply].insert(uci, at: 0)
-            if killers[ply].count > 2 {
-                killers[ply].removeLast()
+        @inline(__always)
+        func checkTimeAndCancel() -> Bool {
+            if cancelled { return true }
+            if (nodes & 511) == 0 {
+                if CFAbsoluteTimeGetCurrent() > deadline || Task.isCancelled {
+                    cancelled = true
+                    return true
+                }
             }
+            return false
+        }
+
+        @inline(__always)
+        func recordKiller(_ packed: UInt16, ply: Int) {
+            guard ply >= 0 && ply < 64 && packed != 0 else { return }
+            if killers0[ply] != packed {
+                killers1[ply] = killers0[ply]
+                killers0[ply] = packed
+            }
+        }
+
+        @inline(__always)
+        func historyIndex(color: PieceColor, packed: UInt16) -> Int {
+            ((color == .white ? 0 : 1) << 12) | Int(packed & 0x0FFF)
+        }
+
+        @inline(__always)
+        func recordHistory(color: PieceColor, packed: UInt16, depth: Int) {
+            let idx = historyIndex(color: color, packed: packed)
+            let bonus = depth * depth
+            let updated = historyTable[idx] + bonus - (historyTable[idx] * bonus) / 16_384
+            historyTable[idx] = min(16_384, max(-16_384, updated))
         }
     }
 
     private static func rootPositionalTieBreaker(for move: ChessMove, board: ChessBoardState) -> Int {
         var bonus = 0
-        let openingBonuses: [String: Int] = [
-            "e2e4": 12, "d2d4": 11, "f1b5": 9, "f1c4": 8,
-            "g1f3": 6, "b1c3": 5, "c2c4": 6,
-            "e7e5": 11, "d7d5": 10, "c7c5": 10, "g8f6": 6,
-            "e7e6": 6, "c7c6": 5
-        ]
-        if board.fullMoveNumber <= 8, let openBonus = openingBonuses[move.uci] {
+        if board.fullMoveNumber <= 8, let openBonus = rootOpeningBonuses[move.uci] {
             bonus += openBonus
         }
 
-        if let piece = board.piece(at: move.from) {
+        if let piece = board.squares[move.from.row][move.from.col] {
             if piece.type == .king && abs(move.to.col - move.from.col) == 2 {
                 bonus += 6
             }
@@ -970,6 +1324,20 @@ private enum LocalAlphaBetaEngine {
             }
         }
         return bonus
+    }
+
+    @inline(__always)
+    private static func hasNonPawnMaterial(_ board: ChessBoardState, color: PieceColor) -> Bool {
+        for r in 0..<8 {
+            let row = board.squares[r]
+            for c in 0..<8 {
+                if let p = row[c], p.color == color,
+                   p.type != .pawn && p.type != .king {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     static func analyze(
@@ -999,20 +1367,78 @@ private enum LocalAlphaBetaEngine {
             )
         }
 
-        let ctx = SearchContext(deadline: Date().addingTimeInterval(timeBudgetSeconds))
+        // Immediate early return on forced single legal move (0ms latency)
+        if rootMoves.count == 1 {
+            let onlyMove = rootMoves[0]
+            let nextBoard = board.applyingRaw(onlyMove)
+            let nextLegal = nextBoard.legalMoves(includeFormattedSAN: false)
+            let rawScore: Int
+            if nextLegal.isEmpty {
+                rawScore = nextBoard.isKingInCheck(nextBoard.sideToMove) ? (mateScore - 1) : 0
+            } else {
+                rawScore = -evaluate(board: nextBoard)
+            }
+            let whiteCP = board.sideToMove == .white ? rawScore : -rawScore
+            var mateMoves: Int? = nil
+            if abs(rawScore) > mateScore - 200 {
+                mateMoves = board.sideToMove == .white ? 1 : -1
+            }
+            let singleLine = PVLine(
+                multipvIndex: 1,
+                bestMove: onlyMove,
+                continuationSAN: [onlyMove.san],
+                continuationUCI: [onlyMove.uci],
+                scoreCentipawns: whiteCP,
+                mateInMoves: mateMoves,
+                depth: 1,
+                sourceLabel: "唯一合法著",
+                predictedOpponentReply: nil,
+                tacticalReason: board.explainMoveTactics(onlyMove)
+            )
+            return EngineAnalysisResult(
+                fen: fen,
+                sideToMove: board.sideToMove,
+                lines: [singleLine],
+                depthReached: 1,
+                isCloudVerified: false,
+                engineSource: isZeroNetworkMode
+                    ? "本機零連網安全引擎 (強制著)"
+                    : "本地離線引擎 (強制著)",
+                nodesSearched: 1,
+                timestamp: Date()
+            )
+        }
+
+        let clampedMaxDepth = min(max(1, maxDepth), 12)
+        let checkedOut = sharedTT.checkout()
+        let ctx = SearchContext(
+            deadline: CFAbsoluteTimeGetCurrent() + timeBudgetSeconds,
+            tt: checkedOut.entries,
+            generation: checkedOut.generation
+        )
+        defer {
+            sharedTT.commit(ctx.tt, generation: ctx.generation)
+        }
+
         var bestScoredMoves: [(move: ChessMove, scoreFromSideToMove: Int, pv: [ChessMove])] = []
         var completedDepth = 1
 
-        let orderedInitial = orderMoves(rootMoves, board: board, pvHintUCI: nil)
+        let rootZKey = OfflineEnginePack.shared.computeZobristHash(for: board)
+        let rootTT = ctx.tt[Int(rootZKey & 65_535)]
+        let rootHintPacked: UInt16 = (rootTT.key == rootZKey && rootTT.flag != 0) ? rootTT.bestPacked : 0
+        let orderedInitial = orderMoves(rootMoves, board: board, ttPacked: rootHintPacked, ply: 0, ctx: ctx)
 
         // Iterative deepening over root moves
-        for depth in 1...max(1, maxDepth) {
-            if Date() > ctx.deadline && depth > 1 { break }
+        for depth in 1...clampedMaxDepth {
+            if (CFAbsoluteTimeGetCurrent() > ctx.deadline || Task.isCancelled) && depth > 1 {
+                break
+            }
             var currentResults: [(move: ChessMove, scoreFromSideToMove: Int, pv: [ChessMove])] = []
+            currentResults.reserveCapacity(rootMoves.count)
             let candidates = bestScoredMoves.isEmpty ? orderedInitial : bestScoredMoves.map(\.move)
 
             for move in candidates {
-                if Date() > ctx.deadline && !bestScoredMoves.isEmpty {
+                if (CFAbsoluteTimeGetCurrent() > ctx.deadline || Task.isCancelled) && !bestScoredMoves.isEmpty {
                     ctx.cancelled = true
                     break
                 }
@@ -1024,6 +1450,7 @@ private enum LocalAlphaBetaEngine {
                     ply: 1,
                     alpha: -mateScore,
                     beta: mateScore,
+                    allowNullMove: true,
                     ctx: ctx,
                     pvOut: &childPV
                 )
@@ -1038,6 +1465,17 @@ private enum LocalAlphaBetaEngine {
                 currentResults.sort { $0.scoreFromSideToMove > $1.scoreFromSideToMove }
                 bestScoredMoves = currentResults
                 completedDepth = depth
+
+                if let topRoot = currentResults.first, abs(topRoot.scoreFromSideToMove) < mateScore - 500 {
+                    ctx.tt[Int(rootZKey & 65_535)] = TTEntry(
+                        key: rootZKey,
+                        depth: Int8(min(depth, 127)),
+                        score: Int32(topRoot.scoreFromSideToMove),
+                        flag: 1,
+                        generation: ctx.generation,
+                        bestPacked: topRoot.move.packed
+                    )
+                }
             } else {
                 break
             }
@@ -1049,6 +1487,7 @@ private enum LocalAlphaBetaEngine {
 
         let pvCount = min(multiPV, bestScoredMoves.count)
         var pvLines: [PVLine] = []
+        pvLines.reserveCapacity(pvCount)
 
         for idx in 0..<pvCount {
             let entry = bestScoredMoves[idx]
@@ -1107,45 +1546,81 @@ private enum LocalAlphaBetaEngine {
         ply: Int,
         alpha: Int,
         beta: Int,
+        allowNullMove: Bool,
         ctx: SearchContext,
         pvOut: inout [ChessMove]
     ) -> Int {
-        if ctx.cancelled || (ctx.nodes & 1023 == 0 && Date() > ctx.deadline) {
-            ctx.cancelled = true
+        if ctx.checkTimeAndCancel() {
             return 0
         }
 
-        if depth <= 0 {
+        let inCheck = board.isKingInCheck(board.sideToMove)
+        let effectiveDepth = (inCheck && ply < 24) ? (depth + 1) : depth
+
+        if effectiveDepth <= 0 {
             return quiescence(board: board, alpha: alpha, beta: beta, ply: ply, ctx: ctx)
         }
 
         ctx.nodes += 1
 
+        let pvNode = (beta - alpha) > 1
         let zKey = OfflineEnginePack.shared.computeZobristHash(for: board)
-        let ttIdx = Int(zKey & 16_383)
+        let ttIdx = Int(zKey & 65_535)
         let ttEntry = ctx.tt[ttIdx]
         var curAlpha = alpha
         var curBeta = beta
-        var ttHint: String? = nil
+        var ttPacked: UInt16 = 0
 
         if ttEntry.key == zKey && ttEntry.flag != 0 {
-            ttHint = ttEntry.bestUCI.isEmpty ? nil : ttEntry.bestUCI
-            if ttEntry.depth >= depth && abs(ttEntry.score) < mateScore - 500 {
+            ttPacked = ttEntry.bestPacked
+            if !pvNode && Int(ttEntry.depth) >= effectiveDepth && abs(Int(ttEntry.score)) < mateScore - 500 {
+                let ttScore = Int(ttEntry.score)
                 if ttEntry.flag == 1 {
-                    if let hint = ttHint, let m = board.legalMove(uci: hint) {
-                        pvOut = [m]
-                    }
-                    return ttEntry.score
+                    return ttScore
                 } else if ttEntry.flag == 2 {
-                    curAlpha = max(curAlpha, ttEntry.score)
+                    if ttScore >= curBeta { return ttScore }
+                    curAlpha = max(curAlpha, ttScore)
                 } else if ttEntry.flag == 3 {
-                    curBeta = min(curBeta, ttEntry.score)
+                    if ttScore <= curAlpha { return ttScore }
+                    curBeta = min(curBeta, ttScore)
                 }
                 if curAlpha >= curBeta {
-                    if let hint = ttHint, let m = board.legalMove(uci: hint) {
-                        pvOut = [m]
-                    }
-                    return ttEntry.score
+                    return curAlpha
+                }
+            }
+        }
+
+        // Static pruning (Reverse Futility Pruning & Null-Move Pruning)
+        if !inCheck && !pvNode && abs(curBeta) < mateScore - 500 && hasNonPawnMaterial(board, color: board.sideToMove) {
+            let staticEval = evaluate(board: board)
+
+            if effectiveDepth <= 3 && staticEval - 85 * effectiveDepth >= curBeta {
+                return curBeta
+            }
+
+            if allowNullMove && effectiveDepth >= 3 && staticEval >= curBeta {
+                var nullBoard = board
+                nullBoard.sideToMove = board.sideToMove == .white ? .black : .white
+                nullBoard.enPassantTarget = nil
+                nullBoard.halfMoveClock += 1
+                if board.sideToMove == .black {
+                    nullBoard.fullMoveNumber += 1
+                }
+                let reduction = effectiveDepth >= 6 ? 3 : 2
+                var nullPV: [ChessMove] = []
+                let nullScore = -negamax(
+                    board: nullBoard,
+                    depth: max(0, effectiveDepth - 1 - reduction),
+                    ply: ply + 1,
+                    alpha: -curBeta,
+                    beta: -curBeta + 1,
+                    allowNullMove: false,
+                    ctx: ctx,
+                    pvOut: &nullPV
+                )
+                if ctx.cancelled { return 0 }
+                if nullScore >= curBeta {
+                    return curBeta
                 }
             }
         }
@@ -1153,52 +1628,119 @@ private enum LocalAlphaBetaEngine {
         let legal = board.legalMoves(includeFormattedSAN: false)
 
         if legal.isEmpty {
-            if board.isKingInCheck(board.sideToMove) {
-                return -mateScore + ply
-            }
-            return 0
+            return inCheck ? (-mateScore + ply) : 0
         }
 
-        let killerUCIs = ply < ctx.killers.count ? ctx.killers[ply] : []
-        let ordered = orderMoves(legal, board: board, pvHintUCI: ttHint, killerUCIs: killerUCIs)
+        let ordered = orderMoves(legal, board: board, ttPacked: ttPacked, ply: ply, ctx: ctx)
         let origAlpha = curAlpha
         var bestAlpha = curAlpha
         var bestPV: [ChessMove] = []
-        var bestUCI = ordered.first?.uci ?? ""
+        var bestPacked: UInt16 = ordered[0].packed
+        let newDepth = effectiveDepth - 1
 
-        for move in ordered {
+        for (moveIdx, move) in ordered.enumerated() {
+            let isQuiet = (move.capturedPiece == nil && move.promotion == nil)
             let next = board.applyingRaw(move)
             var childPV: [ChessMove] = []
-            let score = -negamax(
-                board: next,
-                depth: depth - 1,
-                ply: ply + 1,
-                alpha: -curBeta,
-                beta: -bestAlpha,
-                ctx: ctx,
-                pvOut: &childPV
-            )
+            var score: Int
+
+            if moveIdx == 0 {
+                score = -negamax(
+                    board: next,
+                    depth: newDepth,
+                    ply: ply + 1,
+                    alpha: -curBeta,
+                    beta: -bestAlpha,
+                    allowNullMove: true,
+                    ctx: ctx,
+                    pvOut: &childPV
+                )
+            } else {
+                var reduction = 0
+                if effectiveDepth >= 3 && moveIdx >= 3 && isQuiet && !inCheck && move.packed != ttPacked {
+                    let isKiller = (ply < 64) && (move.packed == ctx.killers0[ply] || move.packed == ctx.killers1[ply])
+                    if !isKiller && !next.isKingInCheck(next.sideToMove) {
+                        reduction = (moveIdx >= 7 && effectiveDepth >= 5) ? 2 : 1
+                    }
+                }
+
+                let reducedDepth = max(0, newDepth - reduction)
+                score = -negamax(
+                    board: next,
+                    depth: reducedDepth,
+                    ply: ply + 1,
+                    alpha: -(bestAlpha + 1),
+                    beta: -bestAlpha,
+                    allowNullMove: true,
+                    ctx: ctx,
+                    pvOut: &childPV
+                )
+
+                if !ctx.cancelled && reduction > 0 && score > bestAlpha {
+                    childPV.removeAll(keepingCapacity: true)
+                    score = -negamax(
+                        board: next,
+                        depth: newDepth,
+                        ply: ply + 1,
+                        alpha: -(bestAlpha + 1),
+                        beta: -bestAlpha,
+                        allowNullMove: true,
+                        ctx: ctx,
+                        pvOut: &childPV
+                    )
+                }
+
+                if !ctx.cancelled && score > bestAlpha && score < curBeta {
+                    childPV.removeAll(keepingCapacity: true)
+                    score = -negamax(
+                        board: next,
+                        depth: newDepth,
+                        ply: ply + 1,
+                        alpha: -curBeta,
+                        beta: -bestAlpha,
+                        allowNullMove: true,
+                        ctx: ctx,
+                        pvOut: &childPV
+                    )
+                }
+            }
+
             if ctx.cancelled { return 0 }
 
             if score >= curBeta {
-                if move.capturedPiece == nil && move.promotion == nil {
-                    ctx.recordKiller(move.uci, ply: ply)
+                if isQuiet {
+                    ctx.recordKiller(move.packed, ply: ply)
+                    ctx.recordHistory(color: board.sideToMove, packed: move.packed, depth: effectiveDepth)
                 }
                 if abs(curBeta) < mateScore - 500 {
-                    ctx.tt[ttIdx] = TTEntry(key: zKey, depth: depth, score: curBeta, flag: 2, bestUCI: move.uci)
+                    ctx.tt[ttIdx] = TTEntry(
+                        key: zKey,
+                        depth: Int8(min(effectiveDepth, 127)),
+                        score: Int32(curBeta),
+                        flag: 2,
+                        generation: ctx.generation,
+                        bestPacked: move.packed
+                    )
                 }
                 return curBeta
             }
             if score > bestAlpha {
                 bestAlpha = score
                 bestPV = [move] + childPV
-                bestUCI = move.uci
+                bestPacked = move.packed
             }
         }
 
         if abs(bestAlpha) < mateScore - 500 {
             let flag: UInt8 = bestAlpha > origAlpha ? 1 : 3
-            ctx.tt[ttIdx] = TTEntry(key: zKey, depth: depth, score: bestAlpha, flag: flag, bestUCI: bestUCI)
+            ctx.tt[ttIdx] = TTEntry(
+                key: zKey,
+                depth: Int8(min(effectiveDepth, 127)),
+                score: Int32(bestAlpha),
+                flag: flag,
+                generation: ctx.generation,
+                bestPacked: bestPacked
+            )
         }
 
         pvOut = bestPV
@@ -1212,29 +1754,49 @@ private enum LocalAlphaBetaEngine {
         ply: Int,
         ctx: SearchContext
     ) -> Int {
-        if ctx.cancelled || (ctx.nodes & 1023 == 0 && Date() > ctx.deadline) {
-            ctx.cancelled = true
+        if ctx.checkTimeAndCancel() {
             return 0
         }
         ctx.nodes += 1
 
-        let standPat = evaluate(board: board)
-        if standPat >= beta {
-            return beta
-        }
-        var bestAlpha = max(alpha, standPat)
+        let inCheck = board.isKingInCheck(board.sideToMove)
+        var bestAlpha = alpha
+        var standPat = -mateScore
 
-        // Limit q-search depth explosion
-        if ply >= 10 {
-            return bestAlpha
+        if !inCheck {
+            standPat = evaluate(board: board)
+            if standPat >= beta {
+                return beta
+            }
+            if standPat > bestAlpha {
+                bestAlpha = standPat
+            }
+            if ply >= 12 {
+                return bestAlpha
+            }
+        } else if ply >= 16 {
+            return evaluate(board: board)
         }
 
-        let captures = board.legalMoves(includeFormattedSAN: false).filter {
-            $0.capturedPiece != nil || $0.promotion != nil
+        let candidates = inCheck
+            ? board.legalMoves(includeFormattedSAN: false)
+            : board.legalTacticalMoves()
+
+        if candidates.isEmpty {
+            return inCheck ? (-mateScore + ply) : bestAlpha
         }
-        let ordered = orderMoves(captures, board: board, pvHintUCI: nil)
+
+        let ordered = orderMoves(candidates, board: board, ttPacked: 0, ply: ply, ctx: ctx)
 
         for move in ordered {
+            if !inCheck {
+                let capGain = move.capturedPiece.map { pieceBaseValue($0) } ?? 0
+                let promoGain = move.promotion.map { pieceBaseValue($0) } ?? 0
+                if standPat + capGain + promoGain + 180 <= bestAlpha {
+                    continue
+                }
+            }
+
             let next = board.applyingRaw(move)
             let score = -quiescence(board: next, alpha: -beta, beta: -bestAlpha, ply: ply + 1, ctx: ctx)
             if ctx.cancelled { return 0 }
@@ -1248,52 +1810,83 @@ private enum LocalAlphaBetaEngine {
         return bestAlpha
     }
 
-    private static func orderMoves(_ moves: [ChessMove], board: ChessBoardState, pvHintUCI: String?, killerUCIs: [String] = []) -> [ChessMove] {
-        return moves.sorted { a, b in
-            scoreMoveOrder(a, board: board, pvHintUCI: pvHintUCI, killerUCIs: killerUCIs) > scoreMoveOrder(b, board: board, pvHintUCI: pvHintUCI, killerUCIs: killerUCIs)
+    private static func orderMoves(
+        _ moves: [ChessMove],
+        board: ChessBoardState,
+        ttPacked: UInt16,
+        ply: Int,
+        ctx: SearchContext?
+    ) -> [ChessMove] {
+        let count = moves.count
+        guard count > 1 else { return moves }
+
+        let k0: UInt16 = (ply >= 0 && ply < 64) ? (ctx?.killers0[ply] ?? 0) : 0
+        let k1: UInt16 = (ply >= 0 && ply < 64) ? (ctx?.killers1[ply] ?? 0) : 0
+        let stm = board.sideToMove
+
+        var scored: [(score: Int, idx: Int)] = []
+        scored.reserveCapacity(count)
+
+        for idx in 0..<count {
+            let move = moves[idx]
+            let pk = move.packed
+            var s: Int
+
+            if ttPacked != 0 && pk == ttPacked {
+                s = 2_000_000
+            } else if let captured = move.capturedPiece {
+                let attackerValue = pieceBaseValue(board.squares[move.from.row][move.from.col]?.type ?? .pawn)
+                s = 1_000_000 + pieceBaseValue(captured) * 16 - attackerValue
+                if let promo = move.promotion {
+                    s += 50_000 + pieceBaseValue(promo)
+                }
+            } else if let promo = move.promotion {
+                s = 900_000 + pieceBaseValue(promo)
+            } else if k0 != 0 && pk == k0 {
+                s = 800_000
+            } else if k1 != 0 && pk == k1 {
+                s = 750_000
+            } else {
+                s = ctx.map { $0.historyTable[$0.historyIndex(color: stm, packed: pk)] } ?? 0
+                if move.isCastling {
+                    s += 6_000
+                }
+                let dist2 = abs(move.to.row * 2 - 7) + abs(move.to.col * 2 - 7)
+                s += (14 - dist2) * 20
+            }
+
+            scored.append((s, idx))
         }
+
+        scored.sort { $0.score > $1.score }
+        var ordered: [ChessMove] = []
+        ordered.reserveCapacity(count)
+        for item in scored {
+            ordered.append(moves[item.idx])
+        }
+        return ordered
     }
 
-    private static func scoreMoveOrder(_ move: ChessMove, board: ChessBoardState, pvHintUCI: String?, killerUCIs: [String] = []) -> Int {
-        if let hint = pvHintUCI, move.uci == hint { return 1_000_000 }
-        var score = 0
-        if let captured = move.capturedPiece {
-            let attackerValue = board.piece(at: move.from)?.baseValue ?? 100
-            score += 10_000 + captured.baseValue * 10 - attackerValue
-        } else if let idx = killerUCIs.firstIndex(of: move.uci) {
-            score += 6_500 - idx * 400
-        }
-        if let promo = move.promotion {
-            score += 8_000 + promo.baseValue
-        }
-        if move.isCastling {
-            score += 500
-        }
-        // Center control bonus
-        let centerDist = abs(Double(move.to.row) - 3.5) + abs(Double(move.to.col) - 3.5)
-        score += Int((7.0 - centerDist) * 10.0)
-        return score
-    }
-
-    /// PeSTO Tapered Evaluation + Passed Pawns + King Shield + Offline Binary Micro-Tables
+    /// PeSTO Tapered Evaluation + Bitmask Passed Pawns + King Shield + Precomputed NNUE Micro-Tables
     fileprivate static func evaluate(board: ChessBoardState) -> Int {
         var mgWhite = 0, mgBlack = 0
         var egWhite = 0, egBlack = 0
         var phase = 0
         var whiteBishops = 0, blackBishops = 0
-        var whiteKingPos: (r: Int, c: Int)? = nil
-        var blackKingPos: (r: Int, c: Int)? = nil
-        var whitePawnFileMask = Array(repeating: 0, count: 8)
-        var blackPawnFileMask = Array(repeating: 0, count: 8)
+        var whiteKingRow = -1, whiteKingCol = -1
+        var blackKingRow = -1, blackKingCol = -1
+        var whitePawnsBB: UInt64 = 0
+        var blackPawnsBB: UInt64 = 0
 
         for r in 0..<8 {
+            let row = board.squares[r]
             for c in 0..<8 {
-                guard let p = board.squares[r][c] else { continue }
-                phase += phaseWeights[p.type] ?? 0
+                guard let p = row[c] else { continue }
+                phase += piecePhaseWeight(p.type)
                 let sqIdx = p.color == .white ? (r * 8 + c) : ((7 - r) * 8 + c)
 
-                let mgMat = mgValues[p.type] ?? 0
-                let egMat = egValues[p.type] ?? 0
+                let mgMat = mgPieceValue(p.type)
+                let egMat = egPieceValue(p.type)
                 let mgPST: Int
                 let egPST: Int
 
@@ -1301,10 +1894,11 @@ private enum LocalAlphaBetaEngine {
                 case .pawn:
                     mgPST = mgPawnPST[sqIdx]
                     egPST = egPawnPST[sqIdx]
+                    let bit = UInt64(1) &<< (r * 8 + c)
                     if p.color == .white {
-                        whitePawnFileMask[c] |= (1 << r)
+                        whitePawnsBB |= bit
                     } else {
-                        blackPawnFileMask[c] |= (1 << r)
+                        blackPawnsBB |= bit
                     }
                 case .knight:
                     mgPST = mgKnightPST[sqIdx]
@@ -1322,7 +1916,13 @@ private enum LocalAlphaBetaEngine {
                 case .king:
                     mgPST = mgKingPST[sqIdx]
                     egPST = egKingPST[sqIdx]
-                    if p.color == .white { whiteKingPos = (r, c) } else { blackKingPos = (r, c) }
+                    if p.color == .white {
+                        whiteKingRow = r
+                        whiteKingCol = c
+                    } else {
+                        blackKingRow = r
+                        blackKingCol = c
+                    }
                 }
 
                 let microAdj = OfflineEnginePack.shared.nnueTableAdjustment(piece: p, row: r, col: c, phase: phase)
@@ -1336,56 +1936,42 @@ private enum LocalAlphaBetaEngine {
             }
         }
 
-        // Passed pawn bonus (weighted towards endgame)
-        let passedBonus = [0, 65, 45, 32, 22, 18, 12, 0]
-        for c in 0..<8 {
-            for r in 1..<7 {
-                guard let p = board.squares[r][c], p.type == .pawn else { continue }
-                let minCol = max(0, c - 1)
-                let maxCol = min(7, c + 1)
-                if p.color == .white {
-                    var blocked = false
-                    for fc in minCol...maxCol {
-                        for ar in 0..<r where (blackPawnFileMask[fc] & (1 << ar)) != 0 {
-                            blocked = true
-                            break
-                        }
-                        if blocked { break }
-                    }
-                    if !blocked {
-                        let bonus = passedBonus[r]
-                        mgWhite += bonus / 2
-                        egWhite += bonus
-                    }
-                } else {
-                    var blocked = false
-                    for fc in minCol...maxCol {
-                        for ar in (r + 1)..<8 where (whitePawnFileMask[fc] & (1 << ar)) != 0 {
-                            blocked = true
-                            break
-                        }
-                        if blocked { break }
-                    }
-                    if !blocked {
-                        let bonus = passedBonus[7 - r]
-                        mgBlack += bonus / 2
-                        egBlack += bonus
-                    }
-                }
+        // O(1) Bitwise Passed Pawn evaluation
+        var wp = whitePawnsBB
+        while wp != 0 {
+            let sq = wp.trailingZeroBitCount
+            wp &= wp &- 1
+            let r = sq >> 3
+            if r >= 1 && r <= 6 && (blackPawnsBB & whitePassedMasks[sq]) == 0 {
+                let bonus = passedPawnBonus[r]
+                mgWhite += bonus >> 1
+                egWhite += bonus
+            }
+        }
+
+        var bp = blackPawnsBB
+        while bp != 0 {
+            let sq = bp.trailingZeroBitCount
+            bp &= bp &- 1
+            let r = sq >> 3
+            if r >= 1 && r <= 6 && (whitePawnsBB & blackPassedMasks[sq]) == 0 {
+                let bonus = passedPawnBonus[7 - r]
+                mgBlack += bonus >> 1
+                egBlack += bonus
             }
         }
 
         // Castled king pawn shield bonus (middlegame)
-        if let wk = whiteKingPos, wk.r == 7 && (wk.c >= 5 || wk.c <= 2) {
-            for fc in max(0, wk.c - 1)...min(7, wk.c + 1) {
-                if (whitePawnFileMask[fc] & ((1 << 6) | (1 << 5))) != 0 {
+        if whiteKingRow == 7 && (whiteKingCol >= 5 || whiteKingCol <= 2) {
+            for fc in max(0, whiteKingCol - 1)...min(7, whiteKingCol + 1) {
+                if (whitePawnsBB & whiteShieldFileMasks[fc]) != 0 {
                     mgWhite += 14
                 }
             }
         }
-        if let bk = blackKingPos, bk.r == 0 && (bk.c >= 5 || bk.c <= 2) {
-            for fc in max(0, bk.c - 1)...min(7, bk.c + 1) {
-                if (blackPawnFileMask[fc] & ((1 << 1) | (1 << 2))) != 0 {
+        if blackKingRow == 0 && (blackKingCol >= 5 || blackKingCol <= 2) {
+            for fc in max(0, blackKingCol - 1)...min(7, blackKingCol + 1) {
+                if (blackPawnsBB & blackShieldFileMasks[fc]) != 0 {
                     mgBlack += 14
                 }
             }

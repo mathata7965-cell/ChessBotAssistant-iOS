@@ -159,23 +159,31 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
         return isSquareAttacked(row: kingSq.row, col: kingSq.col, by: color.opposite)
     }
 
+    private static let knightOffsets: [(Int, Int)] = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+    private static let orthoDirs: [(Int, Int)] = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    private static let diagDirs: [(Int, Int)] = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+    private static let queenDirs: [(Int, Int)] = [(-1, -1), (-1, 1), (1, -1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 1)]
+
     func isSquareAttacked(row: Int, col: Int, by attacker: PieceColor) -> Bool {
         // 1. Pawns
         let pawnSourceRow = attacker == .white ? row + 1 : row - 1
         if pawnSourceRow >= 0 && pawnSourceRow < 8 {
-            for dc in [-1, 1] {
-                let c = col + dc
-                if c >= 0 && c < 8,
-                   let p = squares[pawnSourceRow][c],
-                   p.color == attacker && p.type == .pawn {
-                    return true
-                }
+            let leftCol = col - 1
+            if leftCol >= 0,
+               let p = squares[pawnSourceRow][leftCol],
+               p.color == attacker && p.type == .pawn {
+                return true
+            }
+            let rightCol = col + 1
+            if rightCol < 8,
+               let p = squares[pawnSourceRow][rightCol],
+               p.color == attacker && p.type == .pawn {
+                return true
             }
         }
 
         // 2. Knights
-        let knightOffsets = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
-        for (dr, dc) in knightOffsets {
+        for (dr, dc) in Self.knightOffsets {
             let r = row + dr
             let c = col + dc
             if r >= 0 && r < 8 && c >= 0 && c < 8,
@@ -187,11 +195,12 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
 
         // 3. King
         for dr in -1...1 {
+            let r = row + dr
+            guard r >= 0 && r < 8 else { continue }
             for dc in -1...1 {
                 if dr == 0 && dc == 0 { continue }
-                let r = row + dr
                 let c = col + dc
-                if r >= 0 && r < 8 && c >= 0 && c < 8,
+                if c >= 0 && c < 8,
                    let p = squares[r][c],
                    p.color == attacker && p.type == .king {
                     return true
@@ -200,8 +209,7 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
         }
 
         // 4. Orthogonal (Rook / Queen)
-        let orthoDirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        for (dr, dc) in orthoDirs {
+        for (dr, dc) in Self.orthoDirs {
             var r = row + dr
             var c = col + dc
             while r >= 0 && r < 8 && c >= 0 && c < 8 {
@@ -217,8 +225,7 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
         }
 
         // 5. Diagonal (Bishop / Queen)
-        let diagDirs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
-        for (dr, dc) in diagDirs {
+        for (dr, dc) in Self.diagDirs {
             var r = row + dr
             var c = col + dc
             while r >= 0 && r < 8 && c >= 0 && c < 8 {
@@ -291,8 +298,7 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
                     }
 
                 case .knight:
-                    let offsets = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
-                    for (dr, dc) in offsets {
+                    for (dr, dc) in Self.knightOffsets {
                         let nr = r + dr
                         let nc = c + dc
                         guard nr >= 0 && nr < 8 && nc >= 0 && nc < 8 else { continue }
@@ -303,13 +309,13 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
                     }
 
                 case .bishop:
-                    addSlidingMoves(from: from, dirs: [(-1, -1), (-1, 1), (1, -1), (1, 1)], enemy: enemy, into: &moves)
+                    addSlidingMoves(from: from, dirs: Self.diagDirs, enemy: enemy, into: &moves)
 
                 case .rook:
-                    addSlidingMoves(from: from, dirs: [(-1, 0), (1, 0), (0, -1), (0, 1)], enemy: enemy, into: &moves)
+                    addSlidingMoves(from: from, dirs: Self.orthoDirs, enemy: enemy, into: &moves)
 
                 case .queen:
-                    addSlidingMoves(from: from, dirs: [(-1, -1), (-1, 1), (1, -1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 1)], enemy: enemy, into: &moves)
+                    addSlidingMoves(from: from, dirs: Self.queenDirs, enemy: enemy, into: &moves)
 
                 case .king:
                     for dr in -1...1 {
@@ -373,14 +379,142 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
         }
     }
 
+    private func addSlidingTacticalMoves(from: BoardSquare, dirs: [(Int, Int)], enemy: PieceColor, into moves: inout [ChessMove]) {
+        for (dr, dc) in dirs {
+            var r = from.row + dr
+            var c = from.col + dc
+            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+                if let target = squares[r][c] {
+                    if target.color == enemy {
+                        moves.append(ChessMove(from: from, to: BoardSquare(row: r, col: c), capturedPiece: target))
+                    }
+                    break
+                }
+                r += dr
+                c += dc
+            }
+        }
+    }
+
+    func generatePseudoLegalTacticalMoves() -> [ChessMove] {
+        var moves: [ChessMove] = []
+        moves.reserveCapacity(16)
+
+        let color = sideToMove
+        let enemy = color.opposite
+        let promoTypes: [PieceType] = [.queen, .rook, .bishop, .knight]
+
+        for r in 0..<8 {
+            for c in 0..<8 {
+                guard let piece = squares[r][c], piece.color == color else { continue }
+                let from = BoardSquare(row: r, col: c)
+
+                switch piece.type {
+                case .pawn:
+                    let dir = color == .white ? -1 : 1
+                    let promoRow = color == .white ? 0 : 7
+                    let oneStep = r + dir
+                    guard oneStep >= 0 && oneStep < 8 else { continue }
+
+                    if oneStep == promoRow && squares[oneStep][c] == nil {
+                        let to = BoardSquare(row: oneStep, col: c)
+                        for promo in promoTypes {
+                            moves.append(ChessMove(from: from, to: to, promotion: promo))
+                        }
+                    }
+
+                    for dc in [-1, 1] {
+                        let nc = c + dc
+                        guard nc >= 0 && nc < 8 else { continue }
+                        let to = BoardSquare(row: oneStep, col: nc)
+                        if let target = squares[oneStep][nc], target.color == enemy {
+                            if oneStep == promoRow {
+                                for promo in promoTypes {
+                                    moves.append(ChessMove(from: from, to: to, promotion: promo, capturedPiece: target))
+                                }
+                            } else {
+                                moves.append(ChessMove(from: from, to: to, capturedPiece: target))
+                            }
+                        } else if let ep = enPassantTarget, ep.row == oneStep && ep.col == nc {
+                            let capturedPawn = squares[r][nc]
+                            moves.append(ChessMove(from: from, to: to, capturedPiece: capturedPawn, isEnPassant: true))
+                        }
+                    }
+
+                case .knight:
+                    for (dr, dc) in Self.knightOffsets {
+                        let nr = r + dr
+                        let nc = c + dc
+                        guard nr >= 0 && nr < 8 && nc >= 0 && nc < 8 else { continue }
+                        if let target = squares[nr][nc], target.color == enemy {
+                            moves.append(ChessMove(from: from, to: BoardSquare(row: nr, col: nc), capturedPiece: target))
+                        }
+                    }
+
+                case .bishop:
+                    addSlidingTacticalMoves(from: from, dirs: Self.diagDirs, enemy: enemy, into: &moves)
+
+                case .rook:
+                    addSlidingTacticalMoves(from: from, dirs: Self.orthoDirs, enemy: enemy, into: &moves)
+
+                case .queen:
+                    addSlidingTacticalMoves(from: from, dirs: Self.queenDirs, enemy: enemy, into: &moves)
+
+                case .king:
+                    for dr in -1...1 {
+                        let nr = r + dr
+                        guard nr >= 0 && nr < 8 else { continue }
+                        for dc in -1...1 {
+                            if dr == 0 && dc == 0 { continue }
+                            let nc = c + dc
+                            guard nc >= 0 && nc < 8 else { continue }
+                            if let target = squares[nr][nc], target.color == enemy {
+                                moves.append(ChessMove(from: from, to: BoardSquare(row: nr, col: nc), capturedPiece: target))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return moves
+    }
+
+    @inline(__always)
+    private func isLegalAfterPseudoMove(_ move: ChessMove, myKingSq: BoardSquare?, enemy: PieceColor) -> Bool {
+        let nextState = applyingRaw(move)
+        if squares[move.from.row][move.from.col]?.type == .king {
+            return !nextState.isSquareAttacked(row: move.to.row, col: move.to.col, by: enemy)
+        }
+        if let kingSq = myKingSq {
+            return !nextState.isSquareAttacked(row: kingSq.row, col: kingSq.col, by: enemy)
+        }
+        return !nextState.isKingInCheck(sideToMove)
+    }
+
+    func legalTacticalMoves() -> [ChessMove] {
+        let pseudo = generatePseudoLegalTacticalMoves()
+        var legal: [ChessMove] = []
+        legal.reserveCapacity(pseudo.count)
+        let myKingSq = findKing(of: sideToMove)
+        let enemy = sideToMove.opposite
+
+        for move in pseudo {
+            if isLegalAfterPseudoMove(move, myKingSq: myKingSq, enemy: enemy) {
+                legal.append(move)
+            }
+        }
+        return legal
+    }
+
     func legalMoves(includeFormattedSAN: Bool = true) -> [ChessMove] {
         let pseudo = generatePseudoLegalMoves()
         var legal: [ChessMove] = []
         legal.reserveCapacity(pseudo.count)
+        let myKingSq = findKing(of: sideToMove)
+        let enemy = sideToMove.opposite
 
         for move in pseudo {
-            let nextState = applyingRaw(move)
-            if !nextState.isKingInCheck(sideToMove) {
+            if isLegalAfterPseudoMove(move, myKingSq: myKingSq, enemy: enemy) {
                 legal.append(move)
             }
         }
@@ -541,6 +675,11 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
     func legalMove(uci: String) -> ChessMove? {
         let target = uci.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return legalMoves().first { $0.uci == target }
+    }
+
+    func legalMove(packed: UInt16, includeFormattedSAN: Bool = false) -> ChessMove? {
+        guard packed != 0 else { return nil }
+        return legalMoves(includeFormattedSAN: includeFormattedSAN).first { $0.packed == packed }
     }
 
     func legalMove(sanOrUCI token: String) -> ChessMove? {

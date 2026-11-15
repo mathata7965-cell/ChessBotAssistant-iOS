@@ -55,7 +55,7 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
         guard sampleBufferType == .video else { return }
 
         let now = CACurrentMediaTime()
-        guard now - lastProcessedTime >= 0.35 else { return }
+        guard now - lastProcessedTime >= 0.18 else { return }
         lastProcessedTime = now
 
         autoreleasepool {
