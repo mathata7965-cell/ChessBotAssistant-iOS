@@ -851,8 +851,16 @@ final class ScreenshotBoardRecognizer: Sendable {
         var whiteKingCandidates: [(row: Int, col: Int, score: Double)] = []
         var blackKingCandidates: [(row: Int, col: Int, score: Double)] = []
 
-        let prevWhiteKing = previousBoard.findKing(color: .white)
-        let prevBlackKing = previousBoard.findKing(color: .black)
+        let prevWhiteKing = previousBoard.findKing(of: .white)
+        let prevBlackKing = previousBoard.findKing(of: .black)
+
+        func isNearKingSquare(_ kingSq: BoardSquare?, row: Int, col: Int, homeRow: Int) -> Bool {
+            guard let pk = kingSq else { return false }
+            if max(abs(pk.row - row), abs(pk.col - col)) <= 1 {
+                return true
+            }
+            return pk.row == homeRow && pk.col == 4 && row == homeRow && (col == 2 || col == 6)
+        }
 
         for r in 0..<8 {
             for c in 0..<8 {
@@ -861,8 +869,8 @@ final class ScreenshotBoardRecognizer: Sendable {
                     if obs.confidence >= 0.88 {
                         highConfCount += 1
                     }
-                    let isNearPrevWhiteKing = prevWhiteKing.map { max(abs($0.row - r), abs($0.col - c)) <= 1 || ($0.row == 7 && $0.col == 4 && r == 7 && (c == 2 || c == 6)) } ?? false
-                    let isNearPrevBlackKing = prevBlackKing.map { max(abs($0.row - r), abs($0.col - c)) <= 1 || ($0.row == 0 && $0.col == 4 && r == 0 && (c == 2 || c == 6)) } ?? false
+                    let isNearPrevWhiteKing = isNearKingSquare(prevWhiteKing, row: r, col: c, homeRow: 7)
+                    let isNearPrevBlackKing = isNearKingSquare(prevBlackKing, row: r, col: c, homeRow: 0)
 
                     if obs.guessedPiece.type == .king || obs.kingLikelihood > 0.45 || (obs.color == .white && isNearPrevWhiteKing) || (obs.color == .black && isNearPrevBlackKing) {
                         var kingScore = obs.kingLikelihood
@@ -1306,7 +1314,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         if kingCount == 0 {
             if let best = candidates.max(by: { $0.score < $1.score }) {
                 grid[best.row][best.col] = ChessPiece(color: color, type: .king)
-            } else if let prevKing = previousBoard.findKing(color: color),
+            } else if let prevKing = previousBoard.findKing(of: color),
                       grid[prevKing.row][prevKing.col]?.color == color {
                 grid[prevKing.row][prevKing.col] = ChessPiece(color: color, type: .king)
             }
@@ -1322,7 +1330,7 @@ final class ScreenshotBoardRecognizer: Sendable {
     ) {
         for color in [PieceColor.white, PieceColor.black] {
             let candidates = color == .white ? whiteCandidates : blackCandidates
-            let prevKing = previousBoard.findKing(color: color)
+            let prevKing = previousBoard.findKing(of: color)
             let homeRow = color == .white ? 7 : 0
             var kingPositions: [(row: Int, col: Int, score: Double)] = []
             for r in 0..<8 {

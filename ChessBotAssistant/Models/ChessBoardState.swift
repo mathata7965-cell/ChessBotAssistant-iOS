@@ -728,7 +728,7 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
     }
 
     func checkingPieces(for camp: PieceColor) -> [(square: BoardSquare, piece: ChessPiece)] {
-        guard let kingSq = findKing(color: camp) else { return [] }
+        guard let kingSq = findKing(of: camp) else { return [] }
         let enemy = camp.opposite
         var attackers: [(square: BoardSquare, piece: ChessPiece)] = []
         let row = kingSq.row
@@ -787,7 +787,7 @@ struct ChessBoardState: Equatable, Hashable, Codable, Sendable {
     }
 
     func pinnedPieces(for camp: PieceColor) -> [PinnedPieceInfo] {
-        guard let kingSq = findKing(color: camp) else { return [] }
+        guard let kingSq = findKing(of: camp) else { return [] }
         let enemy = camp.opposite
         var pins: [PinnedPieceInfo] = []
 
