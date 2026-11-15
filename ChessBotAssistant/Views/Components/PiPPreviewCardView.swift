@@ -44,9 +44,9 @@ struct PiPPreviewCardView: View {
                         Image(systemName: "playpause.fill")
                         Text("掃描")
                         Image(systemName: "forward.fill")
-                        Text("走步")
+                        Text("換步")
                         Image(systemName: "backward.fill")
-                        Text("悔步")
+                        Text("重置")
                     }
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundColor(Color(white: 0.65))

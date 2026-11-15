@@ -70,23 +70,40 @@ struct ScreenshotScannerSheetView: View {
                                     .frame(maxWidth: .infinity)
                                 }
 
-                                VStack(spacing: 4) {
-                                    Text("辨識結果")
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("已偵測棋盤", systemImage: "checkmark.circle.fill")
+                                        .font(.caption.bold())
+                                        .foregroundColor(Color(red: 0.52, green: 0.88, blue: 0.48))
+
+                                    let pieceTotal = board.squares.flatMap { $0 }.compactMap { $0 }.count
+                                    Text("我方視角：執\(detectedPerspective.displayName)")
+                                        .font(.caption.bold())
+                                        .foregroundColor(.white)
+
+                                    Text("辨識棋子：\(pieceTotal) 枚")
                                         .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    InteractiveChessBoardView(
-                                        boardState: board,
-                                        perspective: detectedPerspective,
-                                        selectedSquare: nil,
-                                        legalTargets: [],
-                                        lastMove: nil,
-                                        pvLines: [],
-                                        showAutoHintArrows: false,
-                                        highlightedPVIndex: nil,
-                                        onTapSquare: { _ in }
-                                    )
+                                        .foregroundColor(.cyan)
+
+                                    Text("輪到：\(selectedTurn.displayName)")
+                                        .font(.caption2)
+                                        .foregroundColor(Color(white: 0.80))
+
+                                    if let rec = latestRecognizedResult {
+                                        Text(rec.campDetectionReason)
+                                            .font(.caption2)
+                                            .foregroundColor(Color(white: 0.68))
+                                            .lineLimit(2)
+                                    }
+
+                                    Text(board.toFEN())
+                                        .font(.system(size: 9.5, design: .monospaced))
+                                        .foregroundColor(Color(white: 0.58))
+                                        .lineLimit(3)
                                 }
-                                .frame(maxWidth: .infinity)
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.white.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
 
                             Picker("目前輪到誰走？", selection: $selectedTurn) {
@@ -95,61 +112,46 @@ struct ScreenshotScannerSheetView: View {
                             }
                             .pickerStyle(.segmented)
 
-                            HStack(spacing: 10) {
-                                Button {
-                                    var updated = board
-                                    updated.sideToMove = selectedTurn
-                                    viewModel.history.append(viewModel.boardState)
-                                    viewModel.boardState = updated
-                                    viewModel.perspective = detectedPerspective
-                                    if let rec = latestRecognizedResult,
-                                       viewModel.engineService.humanMatchSafetyLockEnabled,
-                                       rec.isLikelyHumanTimedGame,
-                                       !rec.isConfirmedBotMatch {
-                                        viewModel.isFairPlaySafetyLocked = true
-                                        viewModel.safetyLockReason = rec.detectedMatchContextNote
-                                        viewModel.showBanner("[安全鎖定] \(rec.detectedMatchContextNote)")
-                                    } else {
-                                        viewModel.isFairPlaySafetyLocked = false
-                                        viewModel.safetyLockReason = nil
-                                        viewModel.showBanner("已套用截圖棋盤並開始分析")
-                                    }
-                                    viewModel.clearSelection()
-                                    viewModel.triggerAnalysis()
-                                    dismiss()
-                                } label: {
-                                    Text("套用到主分析棋盤")
-                                        .font(.headline)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                        .background(Color(red: 0.50, green: 0.72, blue: 0.30))
-                                        .foregroundColor(Color(red: 0.06, green: 0.10, blue: 0.05))
-                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                            Button {
+                                var updated = board
+                                updated.sideToMove = selectedTurn
+                                viewModel.history.append(viewModel.boardState)
+                                viewModel.boardState = updated
+                                viewModel.perspective = detectedPerspective
+                                viewModel.isBoardDetected = true
+                                if let rec = latestRecognizedResult,
+                                   viewModel.engineService.humanMatchSafetyLockEnabled,
+                                   rec.isLikelyHumanTimedGame,
+                                   !rec.isConfirmedBotMatch {
+                                    viewModel.isFairPlaySafetyLocked = true
+                                    viewModel.safetyLockReason = rec.detectedMatchContextNote
+                                    viewModel.showBanner("[安全鎖定] \(rec.detectedMatchContextNote)")
+                                } else {
+                                    viewModel.isFairPlaySafetyLocked = false
+                                    viewModel.safetyLockReason = nil
+                                    viewModel.showBanner("已套用識別局面並開始分析")
                                 }
-
-                                Button {
-                                    var updated = board
-                                    updated.sideToMove = selectedTurn
-                                    viewModel.boardState = updated
-                                    viewModel.perspective = detectedPerspective
-                                    dismiss()
-                                    viewModel.showBoardEditorSheet = true
-                                } label: {
-                                    Text("微調棋子")
-                                        .font(.subheadline.bold())
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 12)
-                                        .background(Color.white.opacity(0.12))
-                                        .foregroundColor(.white)
-                                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                                }
+                                viewModel.clearSelection()
+                                viewModel.triggerAnalysis()
+                                dismiss()
+                            } label: {
+                                Text("套用局面並開始分析")
+                                    .font(.headline)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(Color(red: 0.50, green: 0.72, blue: 0.30))
+                                    .foregroundColor(Color(red: 0.06, green: 0.10, blue: 0.05))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
                             }
                         }
                     } else {
                         VStack(spacing: 10) {
                             Image(systemName: "viewfinder")
                                 .font(.system(size: 44))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.cyan)
+                            Text("等待偵測棋盤")
+                                .font(.headline)
+                                .foregroundColor(.white)
                             Text(scanNotes)
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)

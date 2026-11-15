@@ -10,6 +10,7 @@ struct LiveBroadcastPayload: Codable, Sendable {
     let campConfidence: Double?
     let campDetectionReason: String?
     let timestamp: Double
+    let boardDetected: Bool?
 }
 
 @MainActor

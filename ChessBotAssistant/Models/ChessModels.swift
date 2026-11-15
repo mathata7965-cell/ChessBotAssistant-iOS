@@ -195,6 +195,14 @@ struct BoardSquare: Codable, Equatable, Hashable, Sendable {
         (row + col) % 2 == 0
     }
 
+    func relativePositionHint(for perspective: PieceColor) -> String {
+        let rowFromBottom = perspective == .white ? (8 - row) : (row + 1)
+        let colFromLeft = perspective == .white ? (col + 1) : (8 - col)
+        let vLabel = rowFromBottom <= 4 ? "下\(rowFromBottom)" : "上\(9 - rowFromBottom)"
+        let hLabel = colFromLeft <= 4 ? "左\(colFromLeft)" : "右\(9 - colFromLeft)"
+        return "\(vLabel)\(hLabel)"
+    }
+
     init(row: Int, col: Int) {
         self.row = row
         self.col = col

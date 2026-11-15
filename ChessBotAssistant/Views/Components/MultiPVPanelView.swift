@@ -12,6 +12,7 @@ struct MultiPVPanelView: View {
     var recommendedThinkRange: String? = nil
     var targetDepth: Int = 12
     var multiPVCount: Int = 3
+    var isBoardDetected: Bool = true
     var isWaitingForOpponentReply: Bool = false
     var paceRemainingSeconds: Int = 0
     var gamePhasePly: Int = 20
@@ -38,7 +39,7 @@ struct MultiPVPanelView: View {
                     Image(systemName: analysis?.isCloudVerified == true ? "cloud.bolt.fill" : "cpu")
                         .font(.caption.bold())
                         .foregroundColor(Color(red: 0.50, green: 0.78, blue: 0.35))
-                    Text(analysis?.engineSource ?? "準備分析中...")
+                    Text(isBoardDetected ? (analysis?.engineSource ?? "準備分析中...") : "等待偵測棋盤")
                         .font(.caption.bold())
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -77,24 +78,43 @@ struct MultiPVPanelView: View {
 
                 Spacer()
 
-                if isAnalyzing {
+                if !isBoardDetected {
+                    Text("待機掃描")
+                        .font(.caption2.bold())
+                        .foregroundColor(.cyan)
+                } else if isAnalyzing {
                     HStack(spacing: 4) {
                         ProgressView()
                             .scaleEffect(0.7)
                             .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
-                        Text("計算中")
+                        Text("穩定計算中")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                 } else if let primary = analysis?.primaryLine {
                     let winPct = Int(primary.winProbability(for: perspective).rounded())
-                    Text("\(perspective.displayName)期望 \(winPct)%")
+                    Text("\(perspective.displayName)勝率 \(winPct)%")
                         .font(.caption.bold())
                         .foregroundColor(winPct >= 50 ? Color(red: 0.45, green: 0.90, blue: 0.52) : Color(red: 0.96, green: 0.55, blue: 0.48))
                 }
             }
 
-            if isSafetyLocked {
+            if !isBoardDetected {
+                VStack(spacing: 6) {
+                    Image(systemName: "viewfinder")
+                        .font(.title2)
+                        .foregroundColor(.cyan)
+                    Text("等待偵測棋盤")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                    Text("讀取到 Chess.com 棋盤後，將在此顯示最佳走法、螢幕位置座標與戰術分析")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 18)
+            } else if isSafetyLocked {
                 HStack(spacing: 10) {
                     Image(systemName: "shield.slash.fill")
                         .font(.title3)
@@ -187,6 +207,9 @@ struct MultiPVPanelView: View {
         let pieceLabel = movingPiece?.type.fullChineseName ?? "棋子"
         let symbolName = movingPiece?.type.sfSymbolName ?? "arrow.right.circle.fill"
         let wdl = line.wdlBreakdown(for: perspective, gamePhasePly: gamePhasePly)
+        let posHint = coachPieceOnlyMode
+            ? line.bestMove.from.relativePositionHint(for: perspective)
+            : "\(line.bestMove.from.relativePositionHint(for: perspective)) -> \(line.bestMove.to.relativePositionHint(for: perspective))"
         let reasonText = line.tacticalReason.isEmpty
             ? (boardState?.explainMoveTactics(line.bestMove) ?? "推薦主線")
             : line.tacticalReason
@@ -202,9 +225,18 @@ struct MultiPVPanelView: View {
 
                 if coachPieceOnlyMode {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("動 \(pieceLabel) (\(line.bestMove.from.algebraic))")
-                            .font(.system(size: 16, weight: .heavy))
-                            .foregroundColor(.white)
+                        HStack(spacing: 6) {
+                            Text("動 \(pieceLabel) (\(line.bestMove.from.algebraic))")
+                                .font(.system(size: 16, weight: .heavy))
+                                .foregroundColor(.white)
+                            Text(posHint)
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.cyan.opacity(0.18))
+                                .foregroundColor(.cyan)
+                                .clipShape(Capsule())
+                        }
                         Text("教練半提示模式：隱藏具體終點與續著")
                             .font(.caption2)
                             .foregroundColor(Color(white: 0.68))
@@ -223,10 +255,20 @@ struct MultiPVPanelView: View {
                                 .foregroundColor(Color(white: 0.78))
                         }
 
-                        Text(reasonText)
-                            .font(.caption2.bold())
-                            .foregroundColor(Color(red: 0.78, green: 0.92, blue: 0.80))
-                            .lineLimit(2)
+                        HStack(spacing: 6) {
+                            Text(posHint)
+                                .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(Color.cyan.opacity(0.16))
+                                .foregroundColor(.cyan)
+                                .clipShape(Capsule())
+
+                            Text(reasonText)
+                                .font(.caption2.bold())
+                                .foregroundColor(Color(red: 0.78, green: 0.92, blue: 0.80))
+                                .lineLimit(2)
+                        }
                     }
                 }
 

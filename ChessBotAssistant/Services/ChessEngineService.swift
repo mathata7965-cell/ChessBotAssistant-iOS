@@ -48,12 +48,25 @@ final class ChessEngineService: ObservableObject {
         isAnalyzing = false
     }
 
+    func clearAnalysis() {
+        activeTask?.cancel()
+        activeTask = nil
+        isAnalyzing = false
+        currentAnalysis = nil
+        lastRawAnalysis = nil
+        lastRawPositionKey = nil
+    }
+
     func analyze(board: ChessBoardState, preserveExcludedMoves: Bool = false) {
         activeTask?.cancel()
         lastErrorMessage = nil
 
         if !preserveExcludedMoves {
             excludedUCIMoves.removeAll()
+        }
+
+        if lastRawPositionKey != board.positionKey {
+            currentAnalysis = nil
         }
 
         let legal = board.legalMoves()
@@ -140,11 +153,8 @@ final class ChessEngineService: ObservableObject {
         activeTask = Task { [weak self] in
             guard let self else { return }
 
-            let localMaxDepth = isZeroNetwork ? min(requestedDepth, 6) : min(requestedDepth, 5)
-            let localBudget: TimeInterval = isZeroNetwork ? 0.85 : 0.30
-
-            let cloudTask: Task<EngineAnalysisResult?, Never>? = allowCloud
-                ? Task {
+            if allowCloud {
+                let cloudTask = Task {
                     await self.fetchCloudAnalysis(
                         board: board,
                         requestedDepth: requestedDepth,
@@ -152,44 +162,36 @@ final class ChessEngineService: ObservableObject {
                         addHumanJitter: activeStyle == .humanSafe
                     )
                 }
-                : nil
 
-            let localResult = await Task.detached(priority: .userInitiated) {
-                LocalAlphaBetaEngine.analyze(
-                    board: board,
-                    maxDepth: localMaxDepth,
-                    multiPV: requestedPV,
-                    timeBudgetSeconds: localBudget,
-                    isZeroNetworkMode: isZeroNetwork,
-                    excludedUCIs: excludedSet
-                )
-            }.value
+                let localResult = await Task.detached(priority: .userInitiated) {
+                    LocalAlphaBetaEngine.analyze(
+                        board: board,
+                        maxDepth: min(requestedDepth, 6),
+                        multiPV: requestedPV,
+                        timeBudgetSeconds: 0.45,
+                        isZeroNetworkMode: isZeroNetwork,
+                        excludedUCIs: excludedSet
+                    )
+                }.value
 
-            if Task.isCancelled {
-                cloudTask?.cancel()
-                return
-            }
+                if Task.isCancelled {
+                    cloudTask.cancel()
+                    return
+                }
 
-            // Give Cloud Stockfish up to ~320ms head-start before publishing local result to eliminate local->cloud flicker
-            if let cloudTask {
-                let quickCloud: EngineAnalysisResult? = await withTaskGroup(of: (isCloud: Bool, result: EngineAnalysisResult?).self) { group in
+                // Single-Commit Policy: wait up to 0.90s for Cloud Stockfish so UI never jumps local->cloud mid-turn
+                let timedCloud: EngineAnalysisResult? = await withTaskGroup(of: (isCloud: Bool, result: EngineAnalysisResult?).self) { group in
                     group.addTask {
                         let val = await cloudTask.value
                         return (true, val)
                     }
                     group.addTask {
-                        try? await Task.sleep(nanoseconds: 100_000_000)
+                        try? await Task.sleep(nanoseconds: 900_000_000)
                         return (false, nil)
                     }
                     while let first = await group.next() {
-                        if first.isCloud, let cloudRes = first.result {
-                            group.cancelAll()
-                            return cloudRes
-                        }
-                        if !first.isCloud {
-                            group.cancelAll()
-                            return nil
-                        }
+                        group.cancelAll()
+                        return first.isCloud ? first.result : nil
                     }
                     return nil
                 }
@@ -199,14 +201,14 @@ final class ChessEngineService: ObservableObject {
                     return
                 }
 
-                if let quickCloud {
-                    let merged = Self.mergeCloudWithLocalFallback(
-                        cloud: quickCloud,
+                if let rawCloud = timedCloud {
+                    let mergedCloud = Self.mergeCloudWithLocalFallback(
+                        cloud: rawCloud,
                         localLines: localResult.lines,
                         multiPV: requestedPV
                     )
-                    let safeCloud = Self.enforceSafeLines(merged, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
-                    self.cloudCache[cacheKey] = merged
+                    self.cloudCache[cacheKey] = mergedCloud
+                    let safeCloud = Self.enforceSafeLines(mergedCloud, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
                     self.lastRawAnalysis = safeCloud
                     self.lastRawPositionKey = board.positionKey
                     self.currentAnalysis = Self.applyPlayStyle(
@@ -216,48 +218,41 @@ final class ChessEngineService: ObservableObject {
                         to: safeCloud,
                         board: board
                     )
-                    self.isAnalyzing = false
-                    return
+                } else {
+                    cloudTask.cancel()
+                    let safeLocal = Self.enforceSafeLines(localResult, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
+                    self.lastRawAnalysis = safeLocal
+                    self.lastRawPositionKey = board.positionKey
+                    self.currentAnalysis = Self.applyPlayStyle(
+                        self.playStyleMode,
+                        botProfile: self.botTargetProfile,
+                        humanTargetElo: self.humanTargetElo,
+                        to: safeLocal,
+                        board: board
+                    )
                 }
-            }
+            } else {
+                let localResult = await Task.detached(priority: .userInitiated) {
+                    LocalAlphaBetaEngine.analyze(
+                        board: board,
+                        maxDepth: min(requestedDepth, 6),
+                        multiPV: requestedPV,
+                        timeBudgetSeconds: 0.75,
+                        isZeroNetworkMode: isZeroNetwork,
+                        excludedUCIs: excludedSet
+                    )
+                }.value
 
-            let safeLocal = Self.enforceSafeLines(localResult, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
-            self.lastRawAnalysis = safeLocal
-            self.lastRawPositionKey = board.positionKey
-            self.currentAnalysis = Self.applyPlayStyle(
-                self.playStyleMode,
-                botProfile: self.botTargetProfile,
-                humanTargetElo: self.humanTargetElo,
-                to: safeLocal,
-                board: board
-            )
-
-            guard let cloudTask else {
-                self.isAnalyzing = false
-                return
-            }
-
-            if let rawCloud = await cloudTask.value {
                 if Task.isCancelled { return }
-                let mergedCloud = Self.mergeCloudWithLocalFallback(
-                    cloud: rawCloud,
-                    localLines: localResult.lines,
-                    multiPV: requestedPV
-                )
-                self.cloudCache[cacheKey] = mergedCloud
-                let stabilized = Self.stabilizeCloudTransition(
-                    cloud: mergedCloud,
-                    previousPublished: safeLocal,
-                    board: board
-                )
-                let safeCloud = Self.enforceSafeLines(stabilized, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
-                self.lastRawAnalysis = safeCloud
+
+                let safeLocal = Self.enforceSafeLines(localResult, board: board, excludedUCIs: excludedSet, multiPV: requestedPV)
+                self.lastRawAnalysis = safeLocal
                 self.lastRawPositionKey = board.positionKey
                 self.currentAnalysis = Self.applyPlayStyle(
                     self.playStyleMode,
                     botProfile: self.botTargetProfile,
                     humanTargetElo: self.humanTargetElo,
-                    to: safeCloud,
+                    to: safeLocal,
                     board: board
                 )
             }
@@ -269,51 +264,6 @@ final class ChessEngineService: ObservableObject {
     }
 
     // MARK: - Cloud Stockfish Integration
-
-    private static func stabilizeCloudTransition(
-        cloud: EngineAnalysisResult,
-        previousPublished: EngineAnalysisResult,
-        board: ChessBoardState
-    ) -> EngineAnalysisResult {
-        guard let prevTop = previousPublished.lines.first,
-              let cloudTop = cloud.lines.first,
-              cloudTop.mateInMoves == nil,
-              prevTop.bestMove.uci != cloudTop.bestMove.uci,
-              let matchIdx = cloud.lines.firstIndex(where: { $0.bestMove.uci == prevTop.bestMove.uci }) else {
-            return cloud
-        }
-        let sideMult = board.sideToMove == .white ? 1 : -1
-        let cpGap = (cloudTop.scoreCentipawns - cloud.lines[matchIdx].scoreCentipawns) * sideMult
-        guard cpGap <= 18 else { return cloud }
-
-        var reordered = cloud.lines
-        let kept = reordered.remove(at: matchIdx)
-        reordered.insert(kept, at: 0)
-        let reindexed = reordered.enumerated().map { idx, line in
-            PVLine(
-                multipvIndex: idx + 1,
-                bestMove: line.bestMove,
-                continuationSAN: line.continuationSAN,
-                continuationUCI: line.continuationUCI,
-                scoreCentipawns: line.scoreCentipawns,
-                mateInMoves: line.mateInMoves,
-                depth: line.depth,
-                sourceLabel: line.sourceLabel,
-                predictedOpponentReply: line.predictedOpponentReply,
-                tacticalReason: line.tacticalReason
-            )
-        }
-        return EngineAnalysisResult(
-            fen: cloud.fen,
-            sideToMove: cloud.sideToMove,
-            lines: reindexed,
-            depthReached: cloud.depthReached,
-            isCloudVerified: cloud.isCloudVerified,
-            engineSource: cloud.engineSource,
-            nodesSearched: cloud.nodesSearched,
-            timestamp: cloud.timestamp
-        )
-    }
 
     private static func enforceSafeLines(
         _ result: EngineAnalysisResult,

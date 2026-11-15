@@ -17,13 +17,17 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
         let campConfidence: Double?
         let campDetectionReason: String?
         let timestamp: Double
+        let boardDetected: Bool
     }
 
     private var lastProcessedTime: CFTimeInterval = 0
     private var lastBoard: ChessBoardState = .startingPosition
     private var lastPerspective: PieceColor = .white
+    private var lastSentPlacementKey: String?
     private var pendingPlacementKey: String?
     private var pendingMatchCount: Int = 0
+    private var noBoardFrameCount: Int = 0
+    private var lastNoBoardSendTime: CFTimeInterval = 0
     private let ciContext = CIContext(options: [.useSoftwareRenderer: true])
     private var udpFD: Int32 = -1
 
@@ -31,8 +35,11 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
         lastProcessedTime = 0
         lastBoard = .startingPosition
         lastPerspective = .white
+        lastSentPlacementKey = nil
         pendingPlacementKey = nil
         pendingMatchCount = 0
+        noBoardFrameCount = 0
+        lastNoBoardSendTime = 0
         openUDPSocketIfNeeded()
     }
 
@@ -48,7 +55,7 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
         guard sampleBufferType == .video else { return }
 
         let now = CACurrentMediaTime()
-        guard now - lastProcessedTime >= 0.45 else { return }
+        guard now - lastProcessedTime >= 0.35 else { return }
         lastProcessedTime = now
 
         autoreleasepool {
@@ -87,14 +94,31 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
                 previousBoard: lastBoard,
                 includePNGCrop: false
             ) else {
+                pendingPlacementKey = nil
+                pendingMatchCount = 0
+                noBoardFrameCount += 1
+                if noBoardFrameCount >= 2 && (now - lastNoBoardSendTime >= 1.2 || lastSentPlacementKey != nil) {
+                    lastNoBoardSendTime = now
+                    lastSentPlacementKey = nil
+                    let waitingPayload = BroadcastPayload(
+                        fen: "",
+                        perspective: lastPerspective.rawValue,
+                        sideToMove: "w",
+                        confidence: 0,
+                        notes: "等待偵測棋盤",
+                        campConfidence: nil,
+                        campDetectionReason: nil,
+                        timestamp: Date().timeIntervalSince1970,
+                        boardDetected: false
+                    )
+                    sendPayloadOverUDP(waitingPayload)
+                }
                 return
             }
 
+            noBoardFrameCount = 0
             let placementKey = result.boardState.positionKey.split(separator: " ").first.map(String.init) ?? ""
-            if result.notes.contains("步") {
-                pendingPlacementKey = nil
-                pendingMatchCount = 0
-            } else {
+            if placementKey != lastSentPlacementKey {
                 if pendingPlacementKey == placementKey {
                     pendingMatchCount += 1
                 } else {
@@ -102,6 +126,10 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
                     pendingMatchCount = 1
                 }
                 guard pendingMatchCount >= 2 else { return }
+                pendingPlacementKey = nil
+                pendingMatchCount = 0
+                lastSentPlacementKey = placementKey
+            } else {
                 pendingPlacementKey = nil
                 pendingMatchCount = 0
             }
@@ -117,7 +145,8 @@ final class BroadcastSampleHandler: RPBroadcastSampleHandler {
                 notes: result.notes,
                 campConfidence: result.campConfidence,
                 campDetectionReason: result.campDetectionReason,
-                timestamp: Date().timeIntervalSince1970
+                timestamp: Date().timeIntervalSince1970,
+                boardDetected: true
             )
             sendPayloadOverUDP(payload)
         }

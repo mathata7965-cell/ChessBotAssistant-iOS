@@ -156,6 +156,13 @@ final class ScreenshotBoardRecognizer: Sendable {
             forcedPerspective: forcedPerspective
         )
 
+        let whiteCount = pieceCount(in: classification.board, color: .white)
+        let blackCount = pieceCount(in: classification.board, color: .black)
+        let totalPieces = whiteCount + blackCount
+        guard whiteCount >= 1, blackCount >= 1, totalPieces >= 2, totalPieces <= 32, classification.confidence >= 0.58 else {
+            return nil
+        }
+
         let pngData: Data? = includePNGCrop ? UIImage(cgImage: croppedBoard).pngData() : nil
 
         let normalizedRect = CGRect(
@@ -324,11 +331,8 @@ final class ScreenshotBoardRecognizer: Sendable {
 
         let bestBox = CGRect(x: bestX, y: bestY, width: bestSize, height: bestSize)
 
-        guard bestScore > 12.0 else {
-            // Fallback center square if screenshot is heavily obscured
-            let s = Double(min(origW, origH))
-            let fy = max(0, (Double(origH) - s) * 0.45)
-            return CGRect(x: (Double(origW) - s) / 2.0, y: fy, width: s, height: s)
+        guard bestScore >= 40.0 else {
+            return nil
         }
 
         // Convert back to original image pixels
@@ -379,6 +383,7 @@ final class ScreenshotBoardRecognizer: Sendable {
         var parityMatches = 0
         for l in lightLums where abs(l - lightMed) < 22.0 { parityMatches += 1 }
         for d in darkLums where abs(d - darkMed) < 22.0 { parityMatches += 1 }
+        guard parityMatches >= 32 else { return -1.0 }
 
         // Check sharp transitions along internal vertical boundaries (7 lines)
         var verticalBoundaryContrast = 0.0

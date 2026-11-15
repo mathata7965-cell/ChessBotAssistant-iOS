@@ -36,6 +36,10 @@ final class AssistantViewModel: ObservableObject {
     @Published var lastMoveQualityBadge: String? = nil
     @Published var boardTheme: BoardTheme = .glacierBlue
     @Published var moveAccuracyScores: [Double] = []
+    @Published var isBoardDetected: Bool = false
+    @Published var lastKnownWinPct: Int = 50
+    @Published var lastKnownWDL: (win: Int, draw: Int, loss: Int) = (38, 24, 38)
+    @Published var lastKnownEvalStr: String = "0.00"
     @Published var isWaitingForOpponentReply: Bool = false
     @Published var paceRecommendedSeconds: Int = 3
     @Published var paceElapsedSeconds: Int = 0
@@ -102,11 +106,13 @@ final class AssistantViewModel: ObservableObject {
     private var previousCampWinPct: Double?
     private var pendingBroadcastKey: String?
     private var pendingBroadcastCount: Int = 0
+    private var previousAcceptedSquares: [[ChessPiece?]]?
+    private var lastAcceptedMoveTime: CFTimeInterval = 0
     private var paceTimer: Timer?
 
     init() {
         setupBindings()
-        triggerAnalysis()
+        syncPiPContent()
         Task { @MainActor [weak self] in
             guard let self else { return }
             let ok = await self.screenshotMonitor.requestPermissionAndStart()
@@ -163,6 +169,10 @@ final class AssistantViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
+                guard self.isBoardDetected else {
+                    self.syncPiPContent()
+                    return
+                }
                 if !self.engineService.reapplyPlayStyle(for: self.boardState) {
                     self.triggerAnalysis()
                 }
@@ -174,6 +184,10 @@ final class AssistantViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
+                guard self.isBoardDetected else {
+                    self.syncPiPContent()
+                    return
+                }
                 if !self.engineService.reapplyPlayStyle(for: self.boardState) {
                     self.triggerAnalysis()
                 }
@@ -185,6 +199,10 @@ final class AssistantViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
+                guard self.isBoardDetected else {
+                    self.syncPiPContent()
+                    return
+                }
                 if !self.engineService.reapplyPlayStyle(for: self.boardState) {
                     self.triggerAnalysis()
                 }
@@ -300,11 +318,23 @@ final class AssistantViewModel: ObservableObject {
             boardTheme: boardTheme,
             isKingInCheck: radar.isKingInCheck,
             pinnedCount: radar.pinnedPieces.count,
-            isWaitingForOpponentReply: isWaitingForOpponentReply
+            isWaitingForOpponentReply: isWaitingForOpponentReply,
+            isBoardDetected: isBoardDetected,
+            isAnalyzing: engineService.isAnalyzing,
+            paceRemainingSeconds: paceRemainingSeconds,
+            stealthSafetyScore: stealthSafetyScore,
+            pinnedSummary: radar.pinnedPieces.map(\.summaryText).joined(separator: "、"),
+            lastKnownWinPct: lastKnownWinPct,
+            lastKnownWDL: lastKnownWDL,
+            lastKnownEvalStr: lastKnownEvalStr
         )
     }
 
     func triggerAnalysis(preserveExcludedMoves: Bool = false) {
+        guard isBoardDetected else {
+            syncPiPContent()
+            return
+        }
         isWaitingForOpponentReply = false
         syncPiPContent()
         startPaceCountdown()
@@ -364,10 +394,16 @@ final class AssistantViewModel: ObservableObject {
                 guard let self else { return }
                 if self.paceElapsedSeconds < self.paceRecommendedSeconds {
                     self.paceElapsedSeconds += 1
+                    if self.pipManager.isPiPActive {
+                        self.syncPiPContent()
+                    }
                 } else {
                     t.invalidate()
                     if self.paceTimer === t {
                         self.paceTimer = nil
+                    }
+                    if self.pipManager.isPiPActive {
+                        self.syncPiPContent()
                     }
                 }
             }
@@ -463,9 +499,17 @@ final class AssistantViewModel: ObservableObject {
         moveHistorySAN.removeAll()
         boardState = .startingPosition
         lastMove = nil
+        isBoardDetected = false
+        isWaitingForOpponentReply = false
         isFairPlaySafetyLocked = false
         safetyLockReason = nil
+        lastScanResult = nil
+        lastRecognizedCropImage = nil
+        detectedCampReason = "自動偵測：等待掃描"
         evalHistoryWhitePct = [50.0]
+        lastKnownWinPct = 50
+        lastKnownWDL = (38, 24, 38)
+        lastKnownEvalStr = "0.00"
         lastMoveQualityBadge = nil
         moveAccuracyScores.removeAll()
         lastEvaluatedFEN = nil
@@ -473,9 +517,12 @@ final class AssistantViewModel: ObservableObject {
         lastSpokenFEN = nil
         pendingBroadcastKey = nil
         pendingBroadcastCount = 0
+        previousAcceptedSquares = nil
+        lastAcceptedMoveTime = 0
         clearSelection()
-        showBanner("已重置為標準開局")
-        triggerAnalysis()
+        engineService.clearAnalysis()
+        syncPiPContent()
+        showBanner("已重置並等待偵測棋盤")
     }
 
     func flipPerspective() {
@@ -607,7 +654,13 @@ final class AssistantViewModel: ObservableObject {
     }
 
     private func recordAnalysisTelemetry(_ analysis: EngineAnalysisResult) {
-        guard analysis.fen != lastEvaluatedFEN, let primary = analysis.primaryLine else { return }
+        guard let primary = analysis.primaryLine else { return }
+        let gamePly = max(1, (boardState.fullMoveNumber - 1) * 2 + (boardState.sideToMove == .white ? 0 : 1))
+        lastKnownWinPct = Int(primary.winProbability(for: perspective).rounded())
+        lastKnownWDL = primary.wdlBreakdown(for: perspective, gamePhasePly: gamePly)
+        lastKnownEvalStr = primary.formattedScore
+
+        guard analysis.fen != lastEvaluatedFEN else { return }
         lastEvaluatedFEN = analysis.fen
         let whitePct = primary.winProbabilityWhite
         evalHistoryWhitePct.append(whitePct)
@@ -708,6 +761,7 @@ final class AssistantViewModel: ObservableObject {
         history = parsed.history
         moveHistorySAN = parsed.moveSANs
         boardState = parsed.state
+        isBoardDetected = true
         lastMove = nil
         clearSelection()
         showBanner("已成功載入局面（輪到\(boardState.sideToMove.displayName)）")
@@ -718,6 +772,7 @@ final class AssistantViewModel: ObservableObject {
     func applyCustomBoard(_ editedBoard: ChessBoardState) {
         history.append(boardState)
         boardState = editedBoard
+        isBoardDetected = true
         lastMove = nil
         clearSelection()
         showBanner("已套用自訂棋盤局面")
@@ -765,6 +820,18 @@ final class AssistantViewModel: ObservableObject {
     }
 
     private func handleBroadcastPayload(_ payload: LiveBroadcastPayload) {
+        if payload.boardDetected == false || payload.fen.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pendingBroadcastKey = nil
+            pendingBroadcastCount = 0
+            if isBoardDetected {
+                isBoardDetected = false
+                isWaitingForOpponentReply = false
+                engineService.clearAnalysis()
+                syncPiPContent()
+            }
+            return
+        }
+
         guard let parsedBoard = ChessBoardState(fen: payload.fen) else { return }
         let newPerspective: PieceColor
         switch campDetectionMode {
@@ -789,9 +856,6 @@ final class AssistantViewModel: ObservableObject {
             adjustedBoard.enPassantTarget = nil
         }
 
-        let boardChanged = adjustedBoard.squares != boardState.squares || adjustedBoard.sideToMove != boardState.sideToMove
-        let perspChanged = newPerspective != perspective
-
         lastSyncTimestamp = Date()
         scanCount += 1
 
@@ -800,30 +864,62 @@ final class AssistantViewModel: ObservableObject {
             pipManager.showPiPBanner("[實時] 畫面同步運作中")
         }
 
+        let placementKey = String(parsedBoard.toFEN().split(separator: " ").first ?? "")
+
+        if !isBoardDetected {
+            if pendingBroadcastKey == placementKey {
+                pendingBroadcastCount += 1
+            } else {
+                pendingBroadcastKey = placementKey
+                pendingBroadcastCount = 1
+            }
+            guard pendingBroadcastCount >= 2 else { return }
+            pendingBroadcastKey = nil
+            pendingBroadcastCount = 0
+            isBoardDetected = true
+            previousAcceptedSquares = nil
+            boardState = adjustedBoard
+            perspective = newPerspective
+            isFairPlaySafetyLocked = false
+            safetyLockReason = nil
+            isWaitingForOpponentReply = false
+            clearSelection()
+            triggerAnalysis()
+            return
+        }
+
+        let boardChanged = adjustedBoard.squares != boardState.squares || adjustedBoard.sideToMove != boardState.sideToMove
+        let perspChanged = newPerspective != perspective
+
         guard boardChanged || perspChanged else {
             pendingBroadcastKey = nil
             pendingBroadcastCount = 0
             return
         }
 
-        // 2-frame gate for abrupt non-delta transitions to prevent mid-animation flickering
         if adjustedBoard.squares != boardState.squares {
-            let placementKey = String(parsedBoard.toFEN().split(separator: " ").first ?? "")
-            let isVerifiedStep = payload.notes.contains("步")
-            if !isVerifiedStep {
-                if pendingBroadcastKey == placementKey {
-                    pendingBroadcastCount += 1
-                } else {
-                    pendingBroadcastKey = placementKey
-                    pendingBroadcastCount = 1
-                }
-                guard pendingBroadcastCount >= 2 else { return }
+            if let prevSq = previousAcceptedSquares,
+               adjustedBoard.squares == prevSq,
+               CACurrentMediaTime() - lastAcceptedMoveTime < 1.2 {
+                return
             }
+
+            // Strict 2-frame stability gate for ALL board transitions (no mid-animation single-frame bypass)
+            if pendingBroadcastKey == placementKey {
+                pendingBroadcastCount += 1
+            } else {
+                pendingBroadcastKey = placementKey
+                pendingBroadcastCount = 1
+            }
+            guard pendingBroadcastCount >= 2 else { return }
         }
         pendingBroadcastKey = nil
         pendingBroadcastCount = 0
 
         if adjustedBoard.squares != boardState.squares {
+            previousAcceptedSquares = boardState.squares
+            lastAcceptedMoveTime = CACurrentMediaTime()
+
             var ownProbe = boardState
             ownProbe.sideToMove = newPerspective
             let matchingOwnMove = ownProbe.legalMoves(includeFormattedSAN: false)
@@ -844,7 +940,7 @@ final class AssistantViewModel: ObservableObject {
             if let ownMove = matchingOwnMove, matchingOppMove == nil {
                 lastMove = ownMove
                 isWaitingForOpponentReply = true
-                engineService.cancelAnalysis()
+                engineService.clearAnalysis()
                 syncPiPContent()
                 return
             } else {
@@ -886,22 +982,21 @@ final class AssistantViewModel: ObservableObject {
             }
         }
 
+        guard isBoardDetected else {
+            pipManager.showPiPBanner("[待機] 等待偵測棋盤中")
+            return
+        }
         guard !isFairPlaySafetyLocked else {
             pipManager.showPiPBanner("[安全鎖] 已隱藏提示")
             return
         }
-        guard let best = engineService.currentAnalysis?.primaryLine?.bestMove else {
-            pipManager.showPiPBanner("[警示] 無可用最佳步")
-            return
-        }
-        let moveLabel = best.san.isEmpty ? best.coordinateDisplay : best.san
-        applyMove(best)
-        pipManager.showPiPBanner("[執行] 已走 \(moveLabel)")
+        skipBlockedMoveAndReanalyze()
+        pipManager.showPiPBanner("[換步] 已切換備選安全步")
     }
 
     func handlePiPSkipBackward() {
-        undoLastMove()
-        pipManager.showPiPBanner("[退回] 已退回一步")
+        resetBoard()
+        pipManager.showPiPBanner("[重置] 等待偵測棋盤")
     }
 
     func handleIncomingURL(_ url: URL) {
@@ -1045,7 +1140,8 @@ final class AssistantViewModel: ObservableObject {
             newBoard.enPassantTarget = nil
         }
 
-        let isIdentical = newBoard.squares == boardState.squares
+        let isIdentical = isBoardDetected
+            && newBoard.squares == boardState.squares
             && newBoard.sideToMove == boardState.sideToMove
             && resolvedCamp == perspective
         if keepSideToMoveIfSameBoard && isIdentical && engineService.currentAnalysis != nil {
@@ -1056,6 +1152,8 @@ final class AssistantViewModel: ObservableObject {
         history.append(boardState)
         boardState = newBoard
         perspective = resolvedCamp
+        isBoardDetected = true
+        previousAcceptedSquares = nil
         lastMove = nil
         clearSelection()
         if isFairPlaySafetyLocked {
