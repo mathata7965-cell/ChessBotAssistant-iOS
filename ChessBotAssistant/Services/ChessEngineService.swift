@@ -1790,7 +1790,7 @@ private enum LocalAlphaBetaEngine {
 
         for move in ordered {
             if !inCheck {
-                let capGain = move.capturedPiece.map { pieceBaseValue($0) } ?? 0
+                let capGain = move.capturedPiece.map { pieceBaseValue($0.type) } ?? 0
                 let promoGain = move.promotion.map { pieceBaseValue($0) } ?? 0
                 if standPat + capGain + promoGain + 180 <= bestAlpha {
                     continue
@@ -1836,7 +1836,7 @@ private enum LocalAlphaBetaEngine {
                 s = 2_000_000
             } else if let captured = move.capturedPiece {
                 let attackerValue = pieceBaseValue(board.squares[move.from.row][move.from.col]?.type ?? .pawn)
-                s = 1_000_000 + pieceBaseValue(captured) * 16 - attackerValue
+                s = 1_000_000 + pieceBaseValue(captured.type) * 16 - attackerValue
                 if let promo = move.promotion {
                     s += 50_000 + pieceBaseValue(promo)
                 }
