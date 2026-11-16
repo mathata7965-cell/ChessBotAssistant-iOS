@@ -1232,11 +1232,13 @@ private struct LaunchIntroOverlayView: View {
                 }
 
                 VStack(spacing: 6) {
+                    let shortVer = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.0"
+                    let buildNum = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "2"
                     Text("Chess Bot 輔助大師")
                         .font(.title2.bold())
                         .foregroundColor(.white)
 
-                    Text("10MB 離線 GM 引擎包 · 防誤封多層護盾已就緒")
+                    Text("v\(shortVer) (Build \(buildNum)) · 10MB 離線 GM 引擎包 · 設定永久記憶已啟用")
                         .font(.caption.bold())
                         .foregroundColor(.cyan)
                 }

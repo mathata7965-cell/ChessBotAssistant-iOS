@@ -235,12 +235,38 @@ struct EngineSettingsSheetView: View {
                         viewModel.copyCurrentFEN()
                     }
                 }
+
+                Section {
+                    let shortVer = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.0"
+                    let buildNum = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "2"
+                    HStack {
+                        Text("版本與更新層級")
+                        Spacer()
+                        Text("v\(shortVer) (Build \(buildNum)) · 大更新")
+                            .font(.caption.bold().monospaced())
+                            .foregroundColor(.cyan)
+                    }
+
+                    Text("所有引擎深度、防誤封開關、陣營與棋盤主題皆已啟用本地持久化保存，重開 App 不會重置。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Button(role: .destructive) {
+                        viewModel.resetAllSettingsToDefaults()
+                    } label: {
+                        Label("重設為系統預設設定", systemImage: "arrow.counterclockwise.circle")
+                    }
+                } header: {
+                    Label("版本資訊與設定管理", systemImage: "checkmark.seal.fill")
+                }
             }
             .navigationTitle("引擎與輔助設定")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("套用並重新分析") {
+                        viewModel.saveAllSettings()
+                        viewModel.showBanner("已永久儲存設定並套用分析")
                         viewModel.triggerAnalysis()
                         dismiss()
                     }

@@ -267,6 +267,48 @@ final class ScreenshotBoardRecognizer: Sendable {
                         width: min(side, Double(origW)),
                         height: min(side, Double(origH))
                     ).integral
+                } else if fastScore >= 38.0 {
+                    // Micro-jitter refinement when UI shifts slightly
+                    var jitterBestScore = fastScore
+                    var jitterBestX = cachedX
+                    var jitterBestY = cachedY
+                    for dy in [-3, 0, 3] {
+                        for dx in [-3, 0, 3] {
+                            if dx == 0 && dy == 0 { continue }
+                            let jx = cachedX + dx
+                            let jy = cachedY + dy
+                            guard jx >= 0, jy >= 0, jx + cachedSize <= targetW, jy + cachedSize <= targetH else { continue }
+                            let s = evaluateCheckerboardScore(
+                                rgba: rgba,
+                                bufW: targetW,
+                                bufH: targetH,
+                                x: jx,
+                                y: jy,
+                                size: cachedSize
+                            )
+                            if s > jitterBestScore {
+                                jitterBestScore = s
+                                jitterBestX = jx
+                                jitterBestY = jy
+                            }
+                        }
+                    }
+                    if jitterBestScore >= 52.0 {
+                        let refinedNorm = CGRect(
+                            x: Double(jitterBestX) / Double(targetW),
+                            y: Double(jitterBestY) / Double(targetH),
+                            width: Double(cachedSize) / Double(targetW),
+                            height: Double(cachedSize) / Double(targetH)
+                        )
+                        rectCache.set(refinedNorm)
+                        let side = (refinedNorm.width * Double(origW)).rounded()
+                        return CGRect(
+                            x: (refinedNorm.minX * Double(origW)).rounded(),
+                            y: (refinedNorm.minY * Double(origH)).rounded(),
+                            width: min(side, Double(origW)),
+                            height: min(side, Double(origH))
+                        ).integral
+                    }
                 }
             }
         }

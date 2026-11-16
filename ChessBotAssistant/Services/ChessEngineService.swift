@@ -2,26 +2,147 @@ import Foundation
 
 @MainActor
 final class ChessEngineService: ObservableObject {
-    @Published var targetDepth: Int = 12
-    @Published var multiPVCount: Int = 3
-    @Published var autoHintEnabled: Bool = true
-    @Published var useCloudStockfish: Bool = true
+    private enum DefaultsKey {
+        static let targetDepth = "cbot.engine.targetDepth"
+        static let multiPVCount = "cbot.engine.multiPVCount"
+        static let autoHintEnabled = "cbot.engine.autoHintEnabled"
+        static let useCloudStockfish = "cbot.engine.useCloudStockfish"
+        static let zeroNetworkIsolationMode = "cbot.engine.zeroNetworkIsolationMode"
+        static let humanMatchSafetyLockEnabled = "cbot.engine.humanMatchSafetyLockEnabled"
+        static let coachPieceOnlyHintMode = "cbot.engine.coachPieceOnlyHintMode"
+        static let playStyleMode = "cbot.engine.playStyleMode"
+        static let botTargetProfile = "cbot.engine.botTargetProfile"
+        static let humanTargetElo = "cbot.engine.humanTargetElo"
+        static let showOpponentReplyArrow = "cbot.engine.showOpponentReplyArrow"
+    }
+
+    private var isRestoringSettings: Bool = false
+
+    @Published var targetDepth: Int = 12 {
+        didSet { persistSetting(targetDepth, forKey: DefaultsKey.targetDepth) }
+    }
+    @Published var multiPVCount: Int = 3 {
+        didSet { persistSetting(multiPVCount, forKey: DefaultsKey.multiPVCount) }
+    }
+    @Published var autoHintEnabled: Bool = true {
+        didSet { persistSetting(autoHintEnabled, forKey: DefaultsKey.autoHintEnabled) }
+    }
+    @Published var useCloudStockfish: Bool = true {
+        didSet { persistSetting(useCloudStockfish, forKey: DefaultsKey.useCloudStockfish) }
+    }
 
     // 防誤封與隱私隔離保護設定
-    @Published var zeroNetworkIsolationMode: Bool = false
-    @Published var humanMatchSafetyLockEnabled: Bool = true
-    @Published var coachPieceOnlyHintMode: Bool = false
+    @Published var zeroNetworkIsolationMode: Bool = false {
+        didSet { persistSetting(zeroNetworkIsolationMode, forKey: DefaultsKey.zeroNetworkIsolationMode) }
+    }
+    @Published var humanMatchSafetyLockEnabled: Bool = true {
+        didSet { persistSetting(humanMatchSafetyLockEnabled, forKey: DefaultsKey.humanMatchSafetyLockEnabled) }
+    }
+    @Published var coachPieceOnlyHintMode: Bool = false {
+        didSet { persistSetting(coachPieceOnlyHintMode, forKey: DefaultsKey.coachPieceOnlyHintMode) }
+    }
 
     // 下棋風格與進階戰術視覺化設定
-    @Published var playStyleMode: PlayStyleMode = .engineBest
-    @Published var botTargetProfile: BotTargetProfile = .universal
-    @Published var humanTargetElo: Int = 1650
-    @Published var showOpponentReplyArrow: Bool = true
+    @Published var playStyleMode: PlayStyleMode = .engineBest {
+        didSet { persistSetting(playStyleMode.rawValue, forKey: DefaultsKey.playStyleMode) }
+    }
+    @Published var botTargetProfile: BotTargetProfile = .universal {
+        didSet { persistSetting(botTargetProfile.rawValue, forKey: DefaultsKey.botTargetProfile) }
+    }
+    @Published var humanTargetElo: Int = 1650 {
+        didSet { persistSetting(humanTargetElo, forKey: DefaultsKey.humanTargetElo) }
+    }
+    @Published var showOpponentReplyArrow: Bool = true {
+        didSet { persistSetting(showOpponentReplyArrow, forKey: DefaultsKey.showOpponentReplyArrow) }
+    }
     @Published var excludedUCIMoves: Set<String> = []
 
     @Published private(set) var isAnalyzing: Bool = false
     @Published private(set) var currentAnalysis: EngineAnalysisResult?
     @Published private(set) var lastErrorMessage: String?
+
+    init() {
+        loadSettings()
+    }
+
+    private func persistSetting(_ value: Any, forKey key: String) {
+        guard !isRestoringSettings else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private func loadSettings() {
+        let defaults = UserDefaults.standard
+        isRestoringSettings = true
+        defer { isRestoringSettings = false }
+
+        if defaults.object(forKey: DefaultsKey.targetDepth) != nil {
+            targetDepth = max(4, min(18, defaults.integer(forKey: DefaultsKey.targetDepth)))
+        }
+        if defaults.object(forKey: DefaultsKey.multiPVCount) != nil {
+            multiPVCount = max(1, min(3, defaults.integer(forKey: DefaultsKey.multiPVCount)))
+        }
+        if defaults.object(forKey: DefaultsKey.autoHintEnabled) != nil {
+            autoHintEnabled = defaults.bool(forKey: DefaultsKey.autoHintEnabled)
+        }
+        if defaults.object(forKey: DefaultsKey.useCloudStockfish) != nil {
+            useCloudStockfish = defaults.bool(forKey: DefaultsKey.useCloudStockfish)
+        }
+        if defaults.object(forKey: DefaultsKey.zeroNetworkIsolationMode) != nil {
+            zeroNetworkIsolationMode = defaults.bool(forKey: DefaultsKey.zeroNetworkIsolationMode)
+        }
+        if defaults.object(forKey: DefaultsKey.humanMatchSafetyLockEnabled) != nil {
+            humanMatchSafetyLockEnabled = defaults.bool(forKey: DefaultsKey.humanMatchSafetyLockEnabled)
+        }
+        if defaults.object(forKey: DefaultsKey.coachPieceOnlyHintMode) != nil {
+            coachPieceOnlyHintMode = defaults.bool(forKey: DefaultsKey.coachPieceOnlyHintMode)
+        }
+        if let styleRaw = defaults.string(forKey: DefaultsKey.playStyleMode),
+           let parsedStyle = PlayStyleMode(rawValue: styleRaw) {
+            playStyleMode = parsedStyle
+        }
+        if let profileRaw = defaults.string(forKey: DefaultsKey.botTargetProfile),
+           let parsedProfile = BotTargetProfile(rawValue: profileRaw) {
+            botTargetProfile = parsedProfile
+        }
+        if defaults.object(forKey: DefaultsKey.humanTargetElo) != nil {
+            humanTargetElo = defaults.integer(forKey: DefaultsKey.humanTargetElo)
+        }
+        if defaults.object(forKey: DefaultsKey.showOpponentReplyArrow) != nil {
+            showOpponentReplyArrow = defaults.bool(forKey: DefaultsKey.showOpponentReplyArrow)
+        }
+    }
+
+    func saveSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(max(4, min(18, targetDepth)), forKey: DefaultsKey.targetDepth)
+        defaults.set(max(1, min(3, multiPVCount)), forKey: DefaultsKey.multiPVCount)
+        defaults.set(autoHintEnabled, forKey: DefaultsKey.autoHintEnabled)
+        defaults.set(useCloudStockfish, forKey: DefaultsKey.useCloudStockfish)
+        defaults.set(zeroNetworkIsolationMode, forKey: DefaultsKey.zeroNetworkIsolationMode)
+        defaults.set(humanMatchSafetyLockEnabled, forKey: DefaultsKey.humanMatchSafetyLockEnabled)
+        defaults.set(coachPieceOnlyHintMode, forKey: DefaultsKey.coachPieceOnlyHintMode)
+        defaults.set(playStyleMode.rawValue, forKey: DefaultsKey.playStyleMode)
+        defaults.set(botTargetProfile.rawValue, forKey: DefaultsKey.botTargetProfile)
+        defaults.set(humanTargetElo, forKey: DefaultsKey.humanTargetElo)
+        defaults.set(showOpponentReplyArrow, forKey: DefaultsKey.showOpponentReplyArrow)
+    }
+
+    func resetSettingsToDefaults() {
+        isRestoringSettings = true
+        targetDepth = 12
+        multiPVCount = 3
+        autoHintEnabled = true
+        useCloudStockfish = true
+        zeroNetworkIsolationMode = false
+        humanMatchSafetyLockEnabled = true
+        coachPieceOnlyHintMode = false
+        playStyleMode = .engineBest
+        botTargetProfile = .universal
+        humanTargetElo = 1650
+        showOpponentReplyArrow = true
+        isRestoringSettings = false
+        saveSettings()
+    }
 
     private var activeTask: Task<Void, Never>?
     private var ponderTask: Task<Void, Never>?
@@ -354,7 +475,7 @@ final class ChessEngineService: ObservableObject {
                         board: board,
                         maxDepth: min(requestedDepth, 12),
                         multiPV: requestedPV,
-                        timeBudgetSeconds: 0.75,
+                        timeBudgetSeconds: 0.85,
                         isZeroNetworkMode: isZeroNetwork,
                         excludedUCIs: excludedSet
                     )
@@ -1617,6 +1738,7 @@ private enum LocalAlphaBetaEngine {
         let generation: UInt8
         var killers0: [UInt16] = Array(repeating: 0, count: 64)
         var killers1: [UInt16] = Array(repeating: 0, count: 64)
+        var counterMoves: [UInt16] = Array(repeating: 0, count: 4_096)
         var historyTable: [Int] = Array(repeating: 0, count: 8_192)
 
         init(deadline: CFAbsoluteTime, tt: [TTEntry], generation: UInt8) {
@@ -1644,6 +1766,18 @@ private enum LocalAlphaBetaEngine {
                 killers1[ply] = killers0[ply]
                 killers0[ply] = packed
             }
+        }
+
+        @inline(__always)
+        func recordCounterMove(prevPacked: UInt16, movePacked: UInt16) {
+            guard prevPacked != 0 && movePacked != 0 else { return }
+            counterMoves[Int(prevPacked & 0x0FFF)] = movePacked
+        }
+
+        @inline(__always)
+        func counterMove(for prevPacked: UInt16) -> UInt16 {
+            guard prevPacked != 0 else { return 0 }
+            return counterMoves[Int(prevPacked & 0x0FFF)]
         }
 
         @inline(__always)
@@ -1790,9 +1924,10 @@ private enum LocalAlphaBetaEngine {
         let rootZKey = OfflineEnginePack.shared.computeZobristHash(for: board)
         let rootTT = ctx.tt[Int(rootZKey & 65_535)]
         let rootHintPacked: UInt16 = (rootTT.key == rootZKey && rootTT.flag != 0) ? rootTT.bestPacked : 0
-        let orderedInitial = orderMoves(rootMoves, board: board, ttPacked: rootHintPacked, ply: 0, ctx: ctx)
+        let orderedInitial = orderMoves(rootMoves, board: board, ttPacked: rootHintPacked, prevPacked: 0, ply: 0, ctx: ctx)
+        let targetPVCount = max(1, min(multiPV, orderedInitial.count))
 
-        // Iterative deepening over root moves
+        // Iterative deepening over root moves with Multi-PV Root Window Pruning
         for depth in 1...clampedMaxDepth {
             if (CFAbsoluteTimeGetCurrent() > ctx.deadline || Task.isCancelled) && depth > 1 {
                 break
@@ -1800,21 +1935,34 @@ private enum LocalAlphaBetaEngine {
             var currentResults: [(move: ChessMove, scoreFromSideToMove: Int, pv: [ChessMove])] = []
             currentResults.reserveCapacity(rootMoves.count)
             let candidates = bestScoredMoves.isEmpty ? orderedInitial : bestScoredMoves.map(\.move)
+            var topScores: [Int] = []
+            topScores.reserveCapacity(targetPVCount + 1)
 
-            for move in candidates {
+            for (rootIdx, move) in candidates.enumerated() {
                 if (CFAbsoluteTimeGetCurrent() > ctx.deadline || Task.isCancelled) && !bestScoredMoves.isEmpty {
                     ctx.cancelled = true
                     break
                 }
                 let nextBoard = board.applyingRaw(move)
                 var childPV: [ChessMove] = []
+
+                // Once we already have `targetPVCount` candidates at depth >= 3, prune root moves strictly worse than the kth cutoff
+                var rootAlpha = -mateScore
+                if depth >= 3 && rootIdx >= targetPVCount && topScores.count >= targetPVCount {
+                    let kthCutoff = topScores[targetPVCount - 1] - 25
+                    if abs(kthCutoff) < mateScore - 600 {
+                        rootAlpha = kthCutoff
+                    }
+                }
+
                 let score = -negamax(
                     board: nextBoard,
                     depth: depth - 1,
                     ply: 1,
                     alpha: -mateScore,
-                    beta: mateScore,
+                    beta: -rootAlpha,
                     allowNullMove: true,
+                    prevPacked: move.packed,
                     ctx: ctx,
                     pvOut: &childPV
                 )
@@ -1822,7 +1970,15 @@ private enum LocalAlphaBetaEngine {
                 let tieBreaker = abs(score) < mateScore - 200
                     ? rootPositionalTieBreaker(for: move, board: board)
                     : 0
-                currentResults.append((move, score + tieBreaker, [move] + childPV))
+                let finalRootScore = score + tieBreaker
+                currentResults.append((move, finalRootScore, [move] + childPV))
+                if topScores.count < targetPVCount {
+                    topScores.append(finalRootScore)
+                    topScores.sort(by: >)
+                } else if finalRootScore > topScores[targetPVCount - 1] {
+                    topScores[targetPVCount - 1] = finalRootScore
+                    topScores.sort(by: >)
+                }
             }
 
             if !ctx.cancelled && !currentResults.isEmpty {
@@ -1913,6 +2069,7 @@ private enum LocalAlphaBetaEngine {
         alpha: Int,
         beta: Int,
         allowNullMove: Bool,
+        prevPacked: UInt16,
         ctx: SearchContext,
         pvOut: inout [ChessMove]
     ) -> Int {
@@ -1983,6 +2140,7 @@ private enum LocalAlphaBetaEngine {
                     alpha: -curBeta,
                     beta: -curBeta + 1,
                     allowNullMove: false,
+                    prevPacked: 0,
                     ctx: ctx,
                     pvOut: &nullPV
                 )
@@ -1999,7 +2157,7 @@ private enum LocalAlphaBetaEngine {
             return inCheck ? (-mateScore + ply) : 0
         }
 
-        let ordered = orderMoves(legal, board: board, ttPacked: ttPacked, ply: ply, ctx: ctx)
+        let ordered = orderMoves(legal, board: board, ttPacked: ttPacked, prevPacked: prevPacked, ply: ply, ctx: ctx)
         let origAlpha = curAlpha
         var bestAlpha = curAlpha
         var bestPV: [ChessMove] = []
@@ -2030,6 +2188,7 @@ private enum LocalAlphaBetaEngine {
                     alpha: -curBeta,
                     beta: -bestAlpha,
                     allowNullMove: true,
+                    prevPacked: move.packed,
                     ctx: ctx,
                     pvOut: &childPV
                 )
@@ -2050,6 +2209,7 @@ private enum LocalAlphaBetaEngine {
                     alpha: -(bestAlpha + 1),
                     beta: -bestAlpha,
                     allowNullMove: true,
+                    prevPacked: move.packed,
                     ctx: ctx,
                     pvOut: &childPV
                 )
@@ -2063,6 +2223,7 @@ private enum LocalAlphaBetaEngine {
                         alpha: -(bestAlpha + 1),
                         beta: -bestAlpha,
                         allowNullMove: true,
+                        prevPacked: move.packed,
                         ctx: ctx,
                         pvOut: &childPV
                     )
@@ -2077,6 +2238,7 @@ private enum LocalAlphaBetaEngine {
                         alpha: -curBeta,
                         beta: -bestAlpha,
                         allowNullMove: true,
+                        prevPacked: move.packed,
                         ctx: ctx,
                         pvOut: &childPV
                     )
@@ -2088,6 +2250,7 @@ private enum LocalAlphaBetaEngine {
             if score >= curBeta {
                 if isQuiet {
                     ctx.recordKiller(move.packed, ply: ply)
+                    ctx.recordCounterMove(prevPacked: prevPacked, movePacked: move.packed)
                     ctx.recordHistory(color: board.sideToMove, packed: move.packed, depth: effectiveDepth)
                 }
                 if abs(curBeta) < mateScore - 500 {
@@ -2164,7 +2327,7 @@ private enum LocalAlphaBetaEngine {
             return inCheck ? (-mateScore + ply) : bestAlpha
         }
 
-        let ordered = orderMoves(candidates, board: board, ttPacked: 0, ply: ply, ctx: ctx)
+        let ordered = orderMoves(candidates, board: board, ttPacked: 0, prevPacked: 0, ply: ply, ctx: ctx)
 
         for move in ordered {
             let precomputedNext: ChessBoardState?
@@ -2209,6 +2372,7 @@ private enum LocalAlphaBetaEngine {
         _ moves: [ChessMove],
         board: ChessBoardState,
         ttPacked: UInt16,
+        prevPacked: UInt16 = 0,
         ply: Int,
         ctx: SearchContext?
     ) -> [ChessMove] {
@@ -2217,6 +2381,7 @@ private enum LocalAlphaBetaEngine {
 
         let k0: UInt16 = (ply >= 0 && ply < 64) ? (ctx?.killers0[ply] ?? 0) : 0
         let k1: UInt16 = (ply >= 0 && ply < 64) ? (ctx?.killers1[ply] ?? 0) : 0
+        let cm: UInt16 = (prevPacked != 0) ? (ctx?.counterMove(for: prevPacked) ?? 0) : 0
         let stm = board.sideToMove
 
         var scored: [(score: Int, idx: Int)] = []
@@ -2246,6 +2411,8 @@ private enum LocalAlphaBetaEngine {
                 s = 800_000
             } else if k1 != 0 && pk == k1 {
                 s = 750_000
+            } else if cm != 0 && pk == cm {
+                s = 720_000
             } else {
                 s = ctx.map { $0.historyTable[$0.historyIndex(color: stm, packed: pk)] } ?? 0
                 if move.isCastling {
@@ -2402,7 +2569,7 @@ private enum LocalAlphaBetaEngine {
             }
         }
 
-        // Rook Open / Semi-Open File & 7th Rank
+        // Rook Open / Semi-Open File, Doubled Rooks & 7th Rank
         var wr = whiteRooksBB
         while wr != 0 {
             let sq = wr.trailingZeroBitCount
@@ -2412,6 +2579,11 @@ private enum LocalAlphaBetaEngine {
             if r == 1 {
                 mgWhite += 22
                 egWhite += 32
+            }
+            let sameFileCount = (whiteRooksBB & fileMasks[c]).nonzeroBitCount
+            if sameFileCount >= 2 {
+                mgWhite += 10
+                egWhite += 8
             }
             if (whitePawnsBB & fileMasks[c]) == 0 {
                 if (blackPawnsBB & fileMasks[c]) == 0 {
@@ -2433,6 +2605,11 @@ private enum LocalAlphaBetaEngine {
             if r == 6 {
                 mgBlack += 22
                 egBlack += 32
+            }
+            let sameFileCount = (blackRooksBB & fileMasks[c]).nonzeroBitCount
+            if sameFileCount >= 2 {
+                mgBlack += 10
+                egBlack += 8
             }
             if (blackPawnsBB & fileMasks[c]) == 0 {
                 if (whitePawnsBB & fileMasks[c]) == 0 {

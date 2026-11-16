@@ -40,18 +40,43 @@ final class AssistantViewModel: ObservableObject {
     @Published var safetyLockReason: String?
 
     // 自動陣營識別、戰術雷達、語音播報與勝率走勢
-    @Published var campDetectionMode: CampDetectionMode = .auto
-    @Published var alwaysAnalyzeMyCampTurn: Bool = true
+    private enum DefaultsKey {
+        static let campDetectionMode = "cbot.assistant.campDetectionMode"
+        static let alwaysAnalyzeMyCampTurn = "cbot.assistant.alwaysAnalyzeMyCampTurn"
+        static let voiceAnnounceEnabled = "cbot.assistant.voiceAnnounceEnabled"
+        static let boardTheme = "cbot.assistant.boardTheme"
+        static let bigScreenBannerPromptEnabled = "cbot.assistant.bigScreenBannerPromptEnabled"
+        static let pipBigScreenBoardMode = "cbot.assistant.pipBigScreenBoardMode"
+        static let threatRadarEnabled = "cbot.assistant.threatRadarEnabled"
+        static let hapticAlertEnabled = "cbot.assistant.hapticAlertEnabled"
+    }
+
+    private var isRestoringSettings: Bool = false
+
+    @Published var campDetectionMode: CampDetectionMode = .auto {
+        didSet { persistSetting(campDetectionMode.rawValue, forKey: DefaultsKey.campDetectionMode) }
+    }
+    @Published var alwaysAnalyzeMyCampTurn: Bool = true {
+        didSet { persistSetting(alwaysAnalyzeMyCampTurn, forKey: DefaultsKey.alwaysAnalyzeMyCampTurn) }
+    }
     @Published var detectedCampReason: String = "自動偵測：等待掃描"
-    @Published var voiceAnnounceEnabled: Bool = false
+    @Published var voiceAnnounceEnabled: Bool = false {
+        didSet { persistSetting(voiceAnnounceEnabled, forKey: DefaultsKey.voiceAnnounceEnabled) }
+    }
     @Published var tacticalRadar: TacticalRadarReport = ChessBoardState.startingPosition.buildTacticalRadar(for: .white, moveHistorySAN: [])
     @Published var evalHistoryWhitePct: [Double] = [50.0]
     @Published var lastMoveQualityBadge: String? = nil
-    @Published var boardTheme: BoardTheme = .glacierBlue
+    @Published var boardTheme: BoardTheme = .glacierBlue {
+        didSet { persistSetting(boardTheme.rawValue, forKey: DefaultsKey.boardTheme) }
+    }
     @Published var moveAccuracyScores: [Double] = []
     @Published var isBoardDetected: Bool = false
-    @Published var bigScreenBannerPromptEnabled: Bool = true
-    @Published var pipBigScreenBoardMode: Bool = false
+    @Published var bigScreenBannerPromptEnabled: Bool = true {
+        didSet { persistSetting(bigScreenBannerPromptEnabled, forKey: DefaultsKey.bigScreenBannerPromptEnabled) }
+    }
+    @Published var pipBigScreenBoardMode: Bool = false {
+        didSet { persistSetting(pipBigScreenBoardMode, forKey: DefaultsKey.pipBigScreenBoardMode) }
+    }
     @Published var showFullScreenBigBoard: Bool = false
     @Published var lastKnownWinPct: Int = 50
     @Published var lastKnownWDL: (win: Int, draw: Int, loss: Int) = (38, 24, 38)
@@ -59,8 +84,12 @@ final class AssistantViewModel: ObservableObject {
     @Published var isWaitingForOpponentReply: Bool = false
     @Published var paceRecommendedSeconds: Int = 3
     @Published var paceElapsedSeconds: Int = 0
-    @Published var threatRadarEnabled: Bool = true
-    @Published var hapticAlertEnabled: Bool = true
+    @Published var threatRadarEnabled: Bool = true {
+        didSet { persistSetting(threatRadarEnabled, forKey: DefaultsKey.threatRadarEnabled) }
+    }
+    @Published var hapticAlertEnabled: Bool = true {
+        didSet { persistSetting(hapticAlertEnabled, forKey: DefaultsKey.hapticAlertEnabled) }
+    }
     @Published var previewPlyOffset: Int = 0
     @Published var selectedPreviewPVIndex: Int = 1
 
@@ -184,6 +213,7 @@ final class AssistantViewModel: ObservableObject {
     private var lastHapticKey: String = ""
 
     init() {
+        loadPersistedSettings()
         UNUserNotificationCenter.current().delegate = TacticalBannerNotificationDelegate.shared
         requestBannerNotificationPermissionIfNeeded()
         setupBindings()
@@ -196,6 +226,87 @@ final class AssistantViewModel: ObservableObject {
                 self.syncPiPContent()
             }
         }
+    }
+
+    private func persistSetting(_ value: Any, forKey key: String) {
+        guard !isRestoringSettings else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private func loadPersistedSettings() {
+        let defaults = UserDefaults.standard
+        isRestoringSettings = true
+        defer { isRestoringSettings = false }
+
+        if let modeRaw = defaults.string(forKey: DefaultsKey.campDetectionMode),
+           let parsedMode = CampDetectionMode(rawValue: modeRaw) {
+            campDetectionMode = parsedMode
+            switch parsedMode {
+            case .auto:
+                detectedCampReason = "自動偵測：等待掃描"
+            case .forceWhite:
+                perspective = .white
+                detectedCampReason = "手動鎖定：固定我執白"
+            case .forceBlack:
+                perspective = .black
+                detectedCampReason = "手動鎖定：固定我執黑"
+            }
+        }
+        if defaults.object(forKey: DefaultsKey.alwaysAnalyzeMyCampTurn) != nil {
+            alwaysAnalyzeMyCampTurn = defaults.bool(forKey: DefaultsKey.alwaysAnalyzeMyCampTurn)
+        }
+        if defaults.object(forKey: DefaultsKey.voiceAnnounceEnabled) != nil {
+            voiceAnnounceEnabled = defaults.bool(forKey: DefaultsKey.voiceAnnounceEnabled)
+        }
+        if let themeRaw = defaults.string(forKey: DefaultsKey.boardTheme),
+           let parsedTheme = BoardTheme(rawValue: themeRaw) {
+            boardTheme = parsedTheme
+        }
+        if defaults.object(forKey: DefaultsKey.bigScreenBannerPromptEnabled) != nil {
+            bigScreenBannerPromptEnabled = defaults.bool(forKey: DefaultsKey.bigScreenBannerPromptEnabled)
+        }
+        if defaults.object(forKey: DefaultsKey.pipBigScreenBoardMode) != nil {
+            pipBigScreenBoardMode = defaults.bool(forKey: DefaultsKey.pipBigScreenBoardMode)
+        }
+        if defaults.object(forKey: DefaultsKey.threatRadarEnabled) != nil {
+            threatRadarEnabled = defaults.bool(forKey: DefaultsKey.threatRadarEnabled)
+        }
+        if defaults.object(forKey: DefaultsKey.hapticAlertEnabled) != nil {
+            hapticAlertEnabled = defaults.bool(forKey: DefaultsKey.hapticAlertEnabled)
+        }
+    }
+
+    func saveAllSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(campDetectionMode.rawValue, forKey: DefaultsKey.campDetectionMode)
+        defaults.set(alwaysAnalyzeMyCampTurn, forKey: DefaultsKey.alwaysAnalyzeMyCampTurn)
+        defaults.set(voiceAnnounceEnabled, forKey: DefaultsKey.voiceAnnounceEnabled)
+        defaults.set(boardTheme.rawValue, forKey: DefaultsKey.boardTheme)
+        defaults.set(bigScreenBannerPromptEnabled, forKey: DefaultsKey.bigScreenBannerPromptEnabled)
+        defaults.set(pipBigScreenBoardMode, forKey: DefaultsKey.pipBigScreenBoardMode)
+        defaults.set(threatRadarEnabled, forKey: DefaultsKey.threatRadarEnabled)
+        defaults.set(hapticAlertEnabled, forKey: DefaultsKey.hapticAlertEnabled)
+        defaults.synchronize()
+        engineService.saveSettings()
+    }
+
+    func resetAllSettingsToDefaults() {
+        isRestoringSettings = true
+        campDetectionMode = .auto
+        alwaysAnalyzeMyCampTurn = true
+        voiceAnnounceEnabled = false
+        boardTheme = .glacierBlue
+        bigScreenBannerPromptEnabled = true
+        pipBigScreenBoardMode = false
+        threatRadarEnabled = true
+        hapticAlertEnabled = true
+        perspective = .white
+        detectedCampReason = "自動偵測：等待掃描"
+        isRestoringSettings = false
+        engineService.resetSettingsToDefaults()
+        saveAllSettings()
+        syncPiPContent()
+        showBanner("已恢復為系統預設設定並永久儲存")
     }
 
     private func requestBannerNotificationPermissionIfNeeded() {

@@ -10,7 +10,9 @@
 param(
     [string]$Token = $env:GITHUB_TOKEN,
     [string]$RepoName = "ChessBotAssistant-iOS",
-    [switch]$PrivateRepo
+    [switch]$PrivateRepo,
+    [ValidateSet("Auto", "Major", "Minor", "Patch", "None")]
+    [string]$VersionBump = "Auto"
 )
 
 $ErrorActionPreference = "Stop"
@@ -158,10 +160,111 @@ try {
 
 $ParentCommitSha = $RefInfo.object.sha
 
+# Auto SemVer Analyzer (Major vs Minor vs Patch) & Sync
+$VersionStatePath = Join-Path $RootDir ".version_state.json"
+$MainPlistPath = Join-Path $RootDir "ChessBotAssistant\Info.plist"
+$ExtPlistPath = Join-Path $RootDir "ChessBroadcastExtension\Info.plist"
+$ProjectYmlPath = Join-Path $RootDir "project.yml"
+
+function Get-TrackedSourceMetrics {
+    param([string]$BaseDir)
+    $map = @{}
+    $tracked = Get-ChildItem -Path $BaseDir -File -Recurse | Where-Object {
+        $rel = $_.FullName.Substring($BaseDir.Length + 1).Replace("\", "/")
+        ($rel -notmatch '^(\.git/|build/)') -and ($_.Extension -in @(".swift", ".py", ".yml")) -and ($_.Name -ne "Build-IPA-Cloud.ps1")
+    }
+    foreach ($item in $tracked) {
+        $rel = $item.FullName.Substring($BaseDir.Length + 1).Replace("\", "/")
+        $hash = (Get-FileHash -Path $item.FullName -Algorithm SHA256).Hash
+        $lineCount = (Get-Content -Path $item.FullName -Encoding UTF8).Count
+        $map[$rel] = @{ hash = $hash; lines = $lineCount }
+    }
+    return $map
+}
+
+function Set-BundleVersionValues {
+    param([string]$ShortVersion, [int]$BuildNumber)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    foreach ($plistPath in @($MainPlistPath, $ExtPlistPath)) {
+        if (Test-Path $plistPath) {
+            $raw = [System.IO.File]::ReadAllText($plistPath, [System.Text.Encoding]::UTF8)
+            $raw = [regex]::Replace($raw, "(<key>CFBundleShortVersionString</key>\s*<string>)[^<]+(</string>)", "`${1}$ShortVersion`${2}")
+            $raw = [regex]::Replace($raw, "(<key>CFBundleVersion</key>\s*<string>)[^<]+(</string>)", "`${1}$BuildNumber`${2}")
+            [System.IO.File]::WriteAllText($plistPath, $raw, $utf8NoBom)
+        }
+    }
+    if (Test-Path $ProjectYmlPath) {
+        $yml = [System.IO.File]::ReadAllText($ProjectYmlPath, [System.Text.Encoding]::UTF8)
+        $yml = [regex]::Replace($yml, '(MARKETING_VERSION:\s*")[^"]+(")', "`${1}$ShortVersion`${2}")
+        $yml = [regex]::Replace($yml, '(CURRENT_PROJECT_VERSION:\s*")[^"]+(")', "`${1}$BuildNumber`${2}")
+        [System.IO.File]::WriteAllText($ProjectYmlPath, $yml, $utf8NoBom)
+    }
+}
+
+$CurrentMainPlist = [System.IO.File]::ReadAllText($MainPlistPath, [System.Text.Encoding]::UTF8)
+$CurShortVer = if ($CurrentMainPlist -match '<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>') { $Matches[1] } else { "2.0.0" }
+$CurBuildNum = if ($CurrentMainPlist -match '<key>CFBundleVersion</key>\s*<string>(\d+)</string>') { [int]$Matches[1] } else { 2 }
+$CurMetrics = Get-TrackedSourceMetrics -BaseDir $RootDir
+
+if ($VersionBump -ne "None") {
+    if (Test-Path $VersionStatePath) {
+        try {
+            $PrevState = Get-Content -Path $VersionStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $ChangedFiles = 0
+            $NewFiles = 0
+            $ApproxChangedLines = 0
+            foreach ($k in $CurMetrics.Keys) {
+                $curEntry = $CurMetrics[$k]
+                $prevProp = $PrevState.files.PSObject.Properties[$k]
+                if (-not $prevProp) {
+                    $NewFiles++
+                    $ChangedFiles++
+                    $ApproxChangedLines += [int]$curEntry.lines
+                } elseif ($prevProp.Value.hash -ne $curEntry.hash) {
+                    $ChangedFiles++
+                    $ApproxChangedLines += [Math]::Max(8, [Math]::Abs([int]$curEntry.lines - [int]$prevProp.Value.lines) + 12)
+                }
+            }
+            if ($ChangedFiles -gt 0 -and $PrevState.shortVersion -eq $CurShortVer) {
+                $Tier = $VersionBump
+                if ($Tier -eq "Auto") {
+                    if ($ChangedFiles -ge 6 -or $NewFiles -ge 2 -or $ApproxChangedLines -ge 450) {
+                        $Tier = "Major"
+                    } elseif ($ChangedFiles -ge 2 -or $NewFiles -ge 1 -or $ApproxChangedLines -ge 80) {
+                        $Tier = "Minor"
+                    } else {
+                        $Tier = "Patch"
+                    }
+                }
+                $Parts = $CurShortVer.Split(".")
+                $Maj = [int]$Parts[0]; $Min = if ($Parts.Count -gt 1) { [int]$Parts[1] } else { 0 }; $Pat = if ($Parts.Count -gt 2) { [int]$Parts[2] } else { 0 }
+                switch ($Tier) {
+                    "Major" { $Maj++; $Min = 0; $Pat = 0; $TierZh = "大更新 (Major)" }
+                    "Minor" { $Min++; $Pat = 0; $TierZh = "中更新 (Minor)" }
+                    "Patch" { $Pat++; $TierZh = "小更新 (Patch)" }
+                }
+                $NewShortVer = "$Maj.$Min.$Pat"
+                $NewBuild = $CurBuildNum + 1
+                Set-BundleVersionValues -ShortVersion $NewShortVer -BuildNumber $NewBuild
+                Write-Host "      版本自動判定：$TierZh | $CurShortVer (Build $CurBuildNum) -> $NewShortVer (Build $NewBuild) | 異動檔案=$ChangedFiles" -ForegroundColor Cyan
+                $CurShortVer = $NewShortVer
+                $CurBuildNum = $NewBuild
+            }
+        } catch { }
+    }
+    $SaveStateObj = @{
+        shortVersion = $CurShortVer
+        buildNumber  = $CurBuildNum
+        files        = $CurMetrics
+    }
+    [System.IO.File]::WriteAllText($VersionStatePath, ($SaveStateObj | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+}
+Write-Host "      當前封裝版本：v$CurShortVer (Build $CurBuildNum)" -ForegroundColor DarkGray
+
 Write-Host "[3/5] 上傳專案檔案至 GitHub (免安裝 Git)..." -ForegroundColor Green
 $AllFiles = Get-ChildItem -Path $RootDir -File -Recurse -Force | Where-Object {
     $rel = $_.FullName.Substring($RootDir.Length + 1).Replace("\", "/")
-    ($rel -notmatch '^(\.git/|build/|ChessBotAssistant\.ipa$|Build-IPA-Cloud\.ps1\.log$|\.github_token\.local$|xcodebuild\.log$)') -and
+    ($rel -notmatch '^(\.git/|build/|ChessBotAssistant\.ipa$|Build-IPA-Cloud\.ps1\.log$|\.github_token\.local$|\.version_state\.json$|xcodebuild\.log$)') -and
     ($_.Name -ne "OfflineEnginePack.bin") -and
     ($_.Extension -ne ".ipa") -and
     ($_.Name -ne ".DS_Store")
