@@ -228,7 +228,7 @@ if ($VersionBump -ne "None") {
             if ($ChangedFiles -gt 0 -and $PrevState.shortVersion -eq $CurShortVer) {
                 $Tier = $VersionBump
                 if ($Tier -eq "Auto") {
-                    if ($ChangedFiles -ge 6 -or $NewFiles -ge 2 -or $ApproxChangedLines -ge 450) {
+                    if ($NewFiles -ge 3 -or ($ChangedFiles -ge 10 -and $ApproxChangedLines -ge 800)) {
                         $Tier = "Major"
                     } elseif ($ChangedFiles -ge 2 -or $NewFiles -ge 1 -or $ApproxChangedLines -ge 80) {
                         $Tier = "Minor"

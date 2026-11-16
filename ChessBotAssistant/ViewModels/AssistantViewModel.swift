@@ -395,6 +395,21 @@ final class AssistantViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        engineService.$masterPersonaMode
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                guard self.isBoardDetected else {
+                    self.syncPiPContent()
+                    return
+                }
+                if !self.engineService.reapplyPlayStyle(for: self.boardState) {
+                    self.triggerAnalysis()
+                }
+            }
+            .store(in: &cancellables)
+
         engineService.$humanTargetElo
             .dropFirst()
             .receive(on: DispatchQueue.main)
@@ -857,6 +872,16 @@ final class AssistantViewModel: ObservableObject {
             engineService.botTargetProfile = .universal
         }
         showBanner("Bot 克制模式：\(engineService.botTargetProfile.displayName)")
+    }
+
+    func cycleMasterPersonaMode() {
+        let all = MasterPersonaMode.allCases
+        if let idx = all.firstIndex(of: engineService.masterPersonaMode) {
+            engineService.masterPersonaMode = all[(idx + 1) % all.count]
+        } else {
+            engineService.masterPersonaMode = .autoAdaptive
+        }
+        showBanner("大師決策模型：\(engineService.masterPersonaMode.displayName)")
     }
 
     func cycleBoardTheme() {

@@ -52,6 +52,15 @@ struct MainAssistantView: View {
                                     }
 
                                     protectionPill(
+                                        title: viewModel.engineService.masterPersonaMode.shortName,
+                                        icon: viewModel.engineService.masterPersonaMode.icon,
+                                        isActive: true,
+                                        activeColor: .cyan
+                                    ) {
+                                        viewModel.cycleMasterPersonaMode()
+                                    }
+
+                                    protectionPill(
                                         title: viewModel.engineService.playStyleMode.displayName,
                                         icon: viewModel.engineService.playStyleMode.icon,
                                         isActive: viewModel.engineService.playStyleMode != .engineBest,
@@ -984,6 +993,15 @@ struct MainAssistantView: View {
                         .foregroundColor(.cyan)
                         .lineLimit(1)
 
+                    Text(viewModel.engineService.lastAIJudgmentReason)
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.indigo.opacity(0.24))
+                        .foregroundColor(Color(red: 0.72, green: 0.86, blue: 1.0))
+                        .clipShape(Capsule())
+                        .lineLimit(1)
+
                     Spacer()
 
                     Text(viewModel.sessionAccuracyText)
@@ -1238,7 +1256,7 @@ private struct LaunchIntroOverlayView: View {
                         .font(.title2.bold())
                         .foregroundColor(.white)
 
-                    Text("v\(shortVer) (Build \(buildNum)) · 10MB 離線 GM 引擎包 · 設定永久記憶已啟用")
+                    Text("v\(shortVer) (Build \(buildNum)) · 10MB 離線 GM 引擎包 · 大師AI自理系統就緒")
                         .font(.caption.bold())
                         .foregroundColor(.cyan)
                 }

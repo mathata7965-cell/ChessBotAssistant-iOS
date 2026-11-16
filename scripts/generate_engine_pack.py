@@ -336,6 +336,45 @@ def build_gm_opening_book() -> dict:
     add_line(book, ["c2c4", "e7e5"], "b1c3", 24, 96, "英國式重心爭奪 d5", "控制中心格與準備 g3")
     add_line(book, ["c2c4", "e7e5", "b1c3"], "g8f6", 22, 94, "英國四馬或逆西西里", "積極出子控制 d5/e4")
 
+    # Grandmaster & Top-Streamer Training Repertoire (Carlsen, Nakamura, Tal, Karpov, Rosen, GothamChess)
+    # 1) Carlsen Catalan (1.d4 Nf6 2.c4 e6 3.g3 d5 4.Bg2 Be7 5.Nf3 O-O 6.O-O)
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e6"], "g2g3", 34, 95, "卡爾森加泰隆尼亞 (Catalan)", "側翼長象極限壓迫黑后翼")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e6", "g2g3"], "d7d5", 26, 98, "加泰隆尼亞中心反擊", "建立 d5 基石對抗 g2 長象")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e6", "g2g3", "d7d5"], "f1g2", 34, 98, "卡爾森大象上線", "強化長斜線壓制 d5/c6/b7")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e6", "g2g3", "d7d5", "f1g2"], "f8e7", 24, 94, "封閉加泰隆尼亞正守", "迅速準備短易位穩守防線")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e6", "g2g3", "d7d5", "f1g2", "f8e7"], "g1f3", 32, 96, "加泰隆尼亞主線 Nf3", "控制 e5 並準備快速易位")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e6", "g2g3", "d7d5", "f1g2", "f8e7", "g1f3"], "e8g8", 24, 96, "黑棋完成短易位", "準備 ...dxc4 或 ...c5 反擊")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e6", "g2g3", "d7d5", "f1g2", "f8e7", "g1f3", "e8g8"], "e1g1", 32, 98, "卡爾森式零破綻壓制", "後續 Qc2/cxd5 擠壓微小優勢")
+
+    # 2) Nakamura King's Indian Attack & Jobava London
+    add_line(book, ["g1f3"], "d7d5", 20, 94, "抗列蒂開局先佔 d5", "建立中心前哨防 e4/c4")
+    add_line(book, ["g1f3", "d7d5"], "g2g3", 22, 90, "中村光王翼小堡 (KIA)", "靈活避免重理論，快速成型攻勢")
+    add_line(book, ["d2d4", "d7d5", "b1c3"], "g8f6", 20, 96, "抗約巴瓦倫敦 (Jobava)", "穩控 e4 兼護 d5")
+    add_line(book, ["d2d4", "d7d5", "b1c3", "g8f6"], "c1f4", 22, 92, "主流主播約巴瓦倫敦", "醞釀 Nb5 威脅 c7 雙擊陷阱")
+    add_line(book, ["d2d4", "d7d5", "b1c3", "g8f6", "c1f4"], "c7c6", 18, 94, "破解約巴瓦 Nb5 飛刀", "先守 c7/d5 再從容出子")
+    add_line(book, ["d2d4", "d7d5", "b1c3", "g8f6", "c1f4"], "a7a6", 16, 90, "完全防堵 Nb5 入侵", "保護 b5 格讓白馬失去支點")
+
+    # 3) GothamChess Caro-Kann / Rossolimo Sicilian / Alapin Refutation
+    add_line(book, ["e2e4", "c7c6", "d2d4", "d7d5", "b1c3", "d5e4", "c3e4", "c8f5"], "e4g3", 28, 96, "卡羅-卡恩經典追象", "先贏得節奏踢象至 g6")
+    add_line(book, ["e2e4", "c7c6", "d2d4", "d7d5", "b1c3", "d5e4", "c3e4", "c8f5", "e4g3"], "f5g6", 26, 98, "卡羅-卡恩主線退象", "維持斜線壓制並伺機推 ...h6")
+    add_line(book, ["e2e4", "c7c6", "d2d4", "d7d5", "b1c3", "d5e4", "c3e4", "c8f5", "e4g3", "f5g6"], "h2h4", 30, 94, "大師級空間衝擊 h4", "醞釀 h5 困住白格象")
+    add_line(book, ["e2e4", "c7c6", "d2d4", "d7d5", "b1c3", "d5e4", "c3e4", "c8f5", "e4g3", "f5g6", "h2h4"], "h7h6", 24, 98, "卡羅-卡恩救象唯一正著", "預留 h7 逃生口化解 h5 陷阱")
+    add_line(book, ["e2e4", "c7c5", "g1f3", "b8c6"], "f1b5", 30, 90, "羅索里莫西西里 (Rossolimo)", "卡爾森大賽愛局，避開理論深坑")
+    add_line(book, ["e2e4", "c7c5", "g1f3", "b8c6", "f1b5"], "g7g6", 24, 94, "抗羅索里莫側翼大象", "控制 d4/e5 長斜線")
+    add_line(book, ["e2e4", "c7c5", "c2c3", "d7d5", "e4d5"], "d8d5", 16, 94, "主播反制阿拉賓正著", "快速活化車路與中心張力")
+    add_line(book, ["e2e4", "c7c5", "c2c3", "d7d5", "e4d5", "d8d5"], "d2d4", 24, 96, "阿拉賓佔領 d4 中心", "逼迫黑棋決定 c5/d4 張力")
+
+    # 4) Eric Rosen / Streamer Trap Counterplay (Traxler, Budapest, Benko/Benoni Refutations)
+    add_line(book, ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "f3g5"], "f8c5", -40, 75, "特拉克斯勒飛刀 (Traxler)", "主播常用棄 f7 反殺陣（需小心 Bxf7+）")
+    add_line(book, ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "f3g5", "f8c5"], "c4f7", 110, 100, "克制 Traxler 正解 Bxf7+", "勿貪吃 Nxf7！象吃將軍最穩健保優勢")
+    add_line(book, ["d2d4", "g8f6", "c2c4"], "c7c5", 22, 86, "塔爾式摩登別諾尼 (Benoni)", "不對稱主動爭取主動反殺空間")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "c7c5"], "d4d5", 38, 98, "佔據空間推進 d5", "壓縮黑棋後翼活動空間")
+    add_line(book, ["d2d4", "g8f6", "c2c4"], "e7e5", 45, 78, "布達佩斯棄兵 (Budapest)", "高節奏快棋奇襲（白棋吃後穩推主動）")
+    add_line(book, ["d2d4", "g8f6", "c2c4", "e7e5"], "d4e5", 65, 98, "接收布達佩斯主動吃兵", "隨後出子並以 Nf3/Bf4 壓制")
+    add_line(book, ["e2e4", "c7c5", "g1f3", "e7e6"], "d2d4", 28, 96, "塔馬諾夫開放中心 d4", "爭奪中心開放節奏")
+    add_line(book, ["e2e4", "c7c5", "g1f3", "e7e6", "d2d4"], "c5d4", 26, 98, "西西里必換兵奪 c 線", "保持兵結構彈性")
+    add_line(book, ["e2e4", "c7c5", "g1f3", "e7e6", "d2d4", "c5d4"], "f3d4", 30, 98, "開放中心控制哨點", "準備 Nc3/Bd3 全面展開")
+
     bot_guides = [
         {
             "id": "martin",

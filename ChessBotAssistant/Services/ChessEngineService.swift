@@ -12,6 +12,7 @@ final class ChessEngineService: ObservableObject {
         static let coachPieceOnlyHintMode = "cbot.engine.coachPieceOnlyHintMode"
         static let playStyleMode = "cbot.engine.playStyleMode"
         static let botTargetProfile = "cbot.engine.botTargetProfile"
+        static let masterPersonaMode = "cbot.engine.masterPersonaMode"
         static let humanTargetElo = "cbot.engine.humanTargetElo"
         static let showOpponentReplyArrow = "cbot.engine.showOpponentReplyArrow"
     }
@@ -49,6 +50,9 @@ final class ChessEngineService: ObservableObject {
     @Published var botTargetProfile: BotTargetProfile = .universal {
         didSet { persistSetting(botTargetProfile.rawValue, forKey: DefaultsKey.botTargetProfile) }
     }
+    @Published var masterPersonaMode: MasterPersonaMode = .autoAdaptive {
+        didSet { persistSetting(masterPersonaMode.rawValue, forKey: DefaultsKey.masterPersonaMode) }
+    }
     @Published var humanTargetElo: Int = 1650 {
         didSet { persistSetting(humanTargetElo, forKey: DefaultsKey.humanTargetElo) }
     }
@@ -60,6 +64,7 @@ final class ChessEngineService: ObservableObject {
     @Published private(set) var isAnalyzing: Bool = false
     @Published private(set) var currentAnalysis: EngineAnalysisResult?
     @Published private(set) var lastErrorMessage: String?
+    @Published private(set) var lastAIJudgmentReason: String = "AI 局勢自理系統待命"
 
     init() {
         loadSettings()
@@ -104,6 +109,10 @@ final class ChessEngineService: ObservableObject {
            let parsedProfile = BotTargetProfile(rawValue: profileRaw) {
             botTargetProfile = parsedProfile
         }
+        if let personaRaw = defaults.string(forKey: DefaultsKey.masterPersonaMode),
+           let parsedPersona = MasterPersonaMode(rawValue: personaRaw) {
+            masterPersonaMode = parsedPersona
+        }
         if defaults.object(forKey: DefaultsKey.humanTargetElo) != nil {
             humanTargetElo = defaults.integer(forKey: DefaultsKey.humanTargetElo)
         }
@@ -123,6 +132,7 @@ final class ChessEngineService: ObservableObject {
         defaults.set(coachPieceOnlyHintMode, forKey: DefaultsKey.coachPieceOnlyHintMode)
         defaults.set(playStyleMode.rawValue, forKey: DefaultsKey.playStyleMode)
         defaults.set(botTargetProfile.rawValue, forKey: DefaultsKey.botTargetProfile)
+        defaults.set(masterPersonaMode.rawValue, forKey: DefaultsKey.masterPersonaMode)
         defaults.set(humanTargetElo, forKey: DefaultsKey.humanTargetElo)
         defaults.set(showOpponentReplyArrow, forKey: DefaultsKey.showOpponentReplyArrow)
     }
@@ -138,6 +148,7 @@ final class ChessEngineService: ObservableObject {
         coachPieceOnlyHintMode = false
         playStyleMode = .engineBest
         botTargetProfile = .universal
+        masterPersonaMode = .autoAdaptive
         humanTargetElo = 1650
         showOpponentReplyArrow = true
         isRestoringSettings = false
@@ -179,12 +190,19 @@ final class ChessEngineService: ObservableObject {
     func reapplyPlayStyle(for board: ChessBoardState) -> Bool {
         guard lastRawPositionKey == board.positionKey, let raw = lastRawAnalysis else { return false }
         let safeRaw = Self.enforceSafeLines(raw, board: board, excludedUCIs: excludedUCIMoves, multiPV: multiPVCount)
-        currentAnalysis = Self.applyPlayStyle(
+        let applied = Self.applyPlayStyle(
             playStyleMode,
             botProfile: botTargetProfile,
+            masterPersona: masterPersonaMode,
             humanTargetElo: humanTargetElo,
             to: safeRaw,
             board: board
+        )
+        currentAnalysis = applied
+        lastAIJudgmentReason = Self.describeAutonomousJudgment(
+            persona: masterPersonaMode,
+            board: board,
+            bestCpForSide: (applied.lines.first?.scoreCentipawns ?? 0) * (board.sideToMove == .white ? 1 : -1)
         )
         return true
     }
@@ -250,6 +268,7 @@ final class ChessEngineService: ObservableObject {
         let allowCloud = useCloudStockfish && !isZeroNetwork
         let activeStyle = playStyleMode
         let activeBotProfile = botTargetProfile
+        let activeMasterPersona = masterPersonaMode
         let activeElo = humanTargetElo
         let excludedSet = excludedUCIMoves
         let cacheKey = "\(board.positionKey)|d\(requestedDepth)|pv\(requestedPV)"
@@ -274,9 +293,15 @@ final class ChessEngineService: ObservableObject {
             currentAnalysis = Self.applyPlayStyle(
                 activeStyle,
                 botProfile: activeBotProfile,
+                masterPersona: activeMasterPersona,
                 humanTargetElo: activeElo,
                 to: safeBook,
                 board: board
+            )
+            lastAIJudgmentReason = Self.describeAutonomousJudgment(
+                persona: activeMasterPersona,
+                board: board,
+                bestCpForSide: (currentAnalysis?.lines.first?.scoreCentipawns ?? 0) * (board.sideToMove == .white ? 1 : -1)
             )
             if !allowCloud || safeBook.lines.count >= requestedPV {
                 isAnalyzing = false
@@ -295,9 +320,15 @@ final class ChessEngineService: ObservableObject {
                 currentAnalysis = Self.applyPlayStyle(
                     activeStyle,
                     botProfile: activeBotProfile,
+                    masterPersona: activeMasterPersona,
                     humanTargetElo: activeElo,
                     to: safeCached,
                     board: board
+                )
+                lastAIJudgmentReason = Self.describeAutonomousJudgment(
+                    persona: activeMasterPersona,
+                    board: board,
+                    bestCpForSide: (currentAnalysis?.lines.first?.scoreCentipawns ?? 0) * (board.sideToMove == .white ? 1 : -1)
                 )
                 isAnalyzing = false
                 ponderOpponentReplies(from: board, analysis: currentAnalysis)
@@ -313,9 +344,15 @@ final class ChessEngineService: ObservableObject {
                 currentAnalysis = Self.applyPlayStyle(
                     activeStyle,
                     botProfile: activeBotProfile,
+                    masterPersona: activeMasterPersona,
                     humanTargetElo: activeElo,
                     to: safeCached,
                     board: board
+                )
+                lastAIJudgmentReason = Self.describeAutonomousJudgment(
+                    persona: activeMasterPersona,
+                    board: board,
+                    bestCpForSide: (currentAnalysis?.lines.first?.scoreCentipawns ?? 0) * (board.sideToMove == .white ? 1 : -1)
                 )
                 isAnalyzing = false
                 ponderOpponentReplies(from: board, analysis: currentAnalysis)
@@ -413,6 +450,7 @@ final class ChessEngineService: ObservableObject {
                     self.currentAnalysis = Self.applyPlayStyle(
                         self.playStyleMode,
                         botProfile: self.botTargetProfile,
+                        masterPersona: self.masterPersonaMode,
                         humanTargetElo: self.humanTargetElo,
                         to: safeCloud,
                         board: board
@@ -464,6 +502,7 @@ final class ChessEngineService: ObservableObject {
                     self.currentAnalysis = Self.applyPlayStyle(
                         self.playStyleMode,
                         botProfile: self.botTargetProfile,
+                        masterPersona: self.masterPersonaMode,
                         humanTargetElo: self.humanTargetElo,
                         to: safeLocal,
                         board: board
@@ -490,6 +529,7 @@ final class ChessEngineService: ObservableObject {
                 self.currentAnalysis = Self.applyPlayStyle(
                     self.playStyleMode,
                     botProfile: self.botTargetProfile,
+                    masterPersona: self.masterPersonaMode,
                     humanTargetElo: self.humanTargetElo,
                     to: safeLocal,
                     board: board
@@ -498,6 +538,13 @@ final class ChessEngineService: ObservableObject {
 
             if !Task.isCancelled {
                 self.isAnalyzing = false
+                let stmSign = board.sideToMove == .white ? 1 : -1
+                let topCp = (self.currentAnalysis?.lines.first?.scoreCentipawns ?? 0) * stmSign
+                self.lastAIJudgmentReason = Self.describeAutonomousJudgment(
+                    persona: self.masterPersonaMode,
+                    board: board,
+                    bestCpForSide: topCp
+                )
                 self.ponderOpponentReplies(from: board, analysis: self.currentAnalysis)
             }
         }
@@ -1041,22 +1088,59 @@ final class ChessEngineService: ObservableObject {
         return bestReply
     }
 
+    nonisolated static func resolveAutonomousPersona(
+        persona: MasterPersonaMode,
+        board: ChessBoardState,
+        bestCpForSide: Int
+    ) -> MasterPersonaMode {
+        guard persona == .autoAdaptive else { return persona }
+        let nonKingCount = totalPieceCount(in: board) - 2
+        if board.isKingInCheck(board.sideToMove) || bestCpForSide <= -140 {
+            return .streamerTricks
+        }
+        if nonKingCount <= 12 {
+            return .carlsenEndgame
+        }
+        if nonKingCount >= 16 && bestCpForSide >= 75 {
+            return .talAttack
+        }
+        if board.fullMoveNumber <= 12 {
+            return .nakamuraBlitz
+        }
+        return .karpovPositional
+    }
+
+    nonisolated static func describeAutonomousJudgment(
+        persona: MasterPersonaMode,
+        board: ChessBoardState,
+        bestCpForSide: Int
+    ) -> String {
+        let resolved = resolveAutonomousPersona(persona: persona, board: board, bestCpForSide: bestCpForSide)
+        if persona == .autoAdaptive {
+            return "AI自理判斷 → 採用\(resolved.shortName)"
+        }
+        return "指定模型：\(resolved.shortName)"
+    }
+
     nonisolated static func applyPlayStyle(
         _ style: PlayStyleMode,
         botProfile: BotTargetProfile = .universal,
+        masterPersona: MasterPersonaMode = .autoAdaptive,
         humanTargetElo: Int = 1650,
         to result: EngineAnalysisResult,
         board: ChessBoardState
     ) -> EngineAnalysisResult {
-        guard (style != .engineBest || botProfile != .universal), result.lines.count > 1 else {
+        guard result.lines.count > 1 else {
             return result
         }
 
         let sideMultiplier = board.sideToMove == .white ? 1 : -1
         let bestCpForSide = (result.lines.first?.scoreCentipawns ?? 0) * sideMultiplier
+        let effectivePersona = resolveAutonomousPersona(persona: masterPersona, board: board, bestCpForSide: bestCpForSide)
+
         let styleTolerance: Int
         switch style {
-        case .engineBest: styleTolerance = 0
+        case .engineBest: styleTolerance = 18
         case .humanSafe:
             if humanTargetElo <= 0 {
                 styleTolerance = 25
@@ -1083,14 +1167,18 @@ final class ChessEngineService: ObservableObject {
 
         let enemyColor = board.sideToMove.opposite
         var enemyQueenSq: BoardSquare? = nil
-        outer: for r in 0..<8 {
+        var enemyKingSq: BoardSquare? = nil
+        for r in 0..<8 {
             for c in 0..<8 {
-                if let p = board.squares[r][c], p.color == enemyColor, p.type == .queen {
+                guard let p = board.squares[r][c], p.color == enemyColor else { continue }
+                if p.type == .queen && enemyQueenSq == nil {
                     enemyQueenSq = BoardSquare(row: r, col: c)
-                    break outer
+                } else if p.type == .king {
+                    enemyKingSq = BoardSquare(row: r, col: c)
                 }
             }
         }
+        let nonKingPieces = max(0, totalPieceCount(in: board) - 2)
 
         func styleBonus(for line: PVLine) -> Int {
             let lineCpForSide = line.scoreCentipawns * sideMultiplier
@@ -1103,6 +1191,67 @@ final class ChessEngineService: ObservableObject {
             let after = board.applying(move)
             let isInDangerAfter = after.isSquareAttacked(row: move.to.row, col: move.to.col, by: enemyColor)
                 && !after.isSquareAttacked(row: move.to.row, col: move.to.col, by: board.sideToMove)
+            let movingPiece = board.piece(at: move.from)
+
+            // Master / Streamer Trained Persona Evaluation Modulation
+            switch effectivePersona {
+            case .autoAdaptive:
+                break
+            case .carlsenEndgame:
+                if nonKingPieces <= 12 && movingPiece?.type == .king {
+                    let centerDistBefore = abs(move.from.row * 2 - 7) + abs(move.from.col * 2 - 7)
+                    let centerDistAfter = abs(move.to.row * 2 - 7) + abs(move.to.col * 2 - 7)
+                    if centerDistAfter < centerDistBefore { bonus += 42 }
+                }
+                if movingPiece?.type == .pawn {
+                    let rankAdvance = board.sideToMove == .white ? (move.from.row - move.to.row) : (move.to.row - move.from.row)
+                    if rankAdvance > 0 && !isInDangerAfter { bonus += 24 }
+                }
+                if bestCpForSide >= 120 && move.capturedPiece != nil && !isInDangerAfter {
+                    bonus += 30
+                }
+            case .nakamuraBlitz:
+                if (2...5).contains(move.to.row) && (2...5).contains(move.to.col) && !isInDangerAfter {
+                    bonus += 24
+                }
+                if board.fullMoveNumber <= 12 && (movingPiece?.type == .knight || movingPiece?.type == .bishop || move.isCastling) {
+                    bonus += 32
+                }
+                if let qSq = enemyQueenSq,
+                   !isInDangerAfter,
+                   after.isSquareAttacked(row: qSq.row, col: qSq.col, by: board.sideToMove) {
+                    bonus += 35
+                }
+            case .talAttack:
+                if san.contains("#") { bonus += 600 }
+                if san.contains("+") { bonus += 70 }
+                if move.capturedPiece != nil { bonus += 42 }
+                if let ek = enemyKingSq {
+                    let kingDist = max(abs(move.to.row - ek.row), abs(move.to.col - ek.col))
+                    if kingDist <= 2 && movingPiece?.type != .king {
+                        bonus += 36
+                    }
+                }
+            case .karpovPositional:
+                if !isInDangerAfter { bonus += 38 }
+                if move.isCastling { bonus += 55 }
+                if movingPiece?.type == .knight && (2...5).contains(move.to.row) && (1...6).contains(move.to.col) {
+                    bonus += 26
+                }
+                if movingPiece?.type == .pawn && board.fullMoveNumber <= 16 && (move.from.col >= 5 || move.from.col <= 2) {
+                    bonus -= 18
+                }
+            case .streamerTricks:
+                if san.contains("+") && !isInDangerAfter { bonus += 52 }
+                if let qSq = enemyQueenSq,
+                   !isInDangerAfter,
+                   after.isSquareAttacked(row: qSq.row, col: qSq.col, by: board.sideToMove) {
+                    bonus += 65
+                }
+                if movingPiece?.type == .knight && !isInDangerAfter && (2...5).contains(move.to.row) {
+                    bonus += 28
+                }
+            }
 
             switch style {
             case .engineBest:
@@ -1162,7 +1311,9 @@ final class ChessEngineService: ObservableObject {
             return a.scoreCentipawns * sideMultiplier > b.scoreCentipawns * sideMultiplier
         }
 
-        let modeTag = style == .engineBest ? botProfile.shortName : style.displayName
+        let modeTag = style == .engineBest
+            ? (botProfile == .universal ? effectivePersona.shortName : "\(effectivePersona.shortName)·\(botProfile.shortName)")
+            : "\(style.displayName)·\(effectivePersona.shortName)"
         let reindexed: [PVLine] = ranked.enumerated().map { idx, line in
             var moveCopy = line.bestMove
             if idx == 0 && (moveCopy.tacticalTag == nil || moveCopy.tacticalTag?.isEmpty == true) {
@@ -2670,7 +2821,50 @@ private enum LocalAlphaBetaEngine {
         if whiteBishops >= 2 { mgWhite += 30; egWhite += 45 }
         if blackBishops >= 2 { mgBlack += 30; egBlack += 45 }
 
+        // Master Principle: Central Pawn Control & King Ring Attack Safety
+        let centerSquares: [(Int, Int)] = [(3, 3), (3, 4), (4, 3), (4, 4)]
+        for (cr, cc) in centerSquares {
+            if let cpPiece = board.squares[cr][cc], cpPiece.type == .pawn {
+                if cpPiece.color == .white { mgWhite += 18 } else { mgBlack += 18 }
+            }
+        }
         let clampedPhase = min(24, phase)
+        if clampedPhase >= 8 {
+            if whiteKingRow >= 0 && board.squares[whiteKingRow][whiteKingCol]?.type == .king {
+                var dangerToWhite = 0
+                if (blackRooksBB & fileMasks[whiteKingCol]) != 0 && (whitePawnsBB & fileMasks[whiteKingCol]) == 0 {
+                    dangerToWhite += 20
+                }
+                if whiteKingRow == 7 && (whiteKingCol >= 5 || whiteKingCol <= 2) {
+                    var bnCheck = blackKnightsBB
+                    while bnCheck != 0 {
+                        let sq = bnCheck.trailingZeroBitCount
+                        bnCheck &= bnCheck &- 1
+                        if abs((sq >> 3) - whiteKingRow) <= 3 && abs((sq & 7) - whiteKingCol) <= 3 {
+                            dangerToWhite += 14
+                        }
+                    }
+                }
+                mgWhite -= dangerToWhite
+            }
+            if blackKingRow >= 0 && board.squares[blackKingRow][blackKingCol]?.type == .king {
+                var dangerToBlack = 0
+                if (whiteRooksBB & fileMasks[blackKingCol]) != 0 && (blackPawnsBB & fileMasks[blackKingCol]) == 0 {
+                    dangerToBlack += 20
+                }
+                if blackKingRow == 0 && (blackKingCol >= 5 || blackKingCol <= 2) {
+                    var wnCheck = whiteKnightsBB
+                    while wnCheck != 0 {
+                        let sq = wnCheck.trailingZeroBitCount
+                        wnCheck &= wnCheck &- 1
+                        if abs((sq >> 3) - blackKingRow) <= 3 && abs((sq & 7) - blackKingCol) <= 3 {
+                            dangerToBlack += 14
+                        }
+                    }
+                }
+                mgBlack -= dangerToBlack
+            }
+        }
         if clampedPhase <= 4 && whiteKingRow >= 0 && blackKingRow >= 0 {
             let rawEgDiff = egWhite - egBlack
             let kingDist = abs(whiteKingRow - blackKingRow) + abs(whiteKingCol - blackKingCol)

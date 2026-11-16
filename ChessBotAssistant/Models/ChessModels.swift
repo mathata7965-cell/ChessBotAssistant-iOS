@@ -394,6 +394,67 @@ enum BotTargetProfile: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum MasterPersonaMode: String, CaseIterable, Identifiable, Sendable {
+    case autoAdaptive = "autoAdaptive"
+    case carlsenEndgame = "carlsenEndgame"
+    case nakamuraBlitz = "nakamuraBlitz"
+    case talAttack = "talAttack"
+    case karpovPositional = "karpovPositional"
+    case streamerTricks = "streamerTricks"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .autoAdaptive: return "AI 局勢自理判斷 (大師綜合)"
+        case .carlsenEndgame: return "卡爾森 Carlsen (殘局擠壓)"
+        case .nakamuraBlitz: return "中村光 Hikaru (超快節奏壓迫)"
+        case .talAttack: return "塔爾 Tal (棄子閃電攻殺)"
+        case .karpovPositional: return "卡爾波夫 / 丁立人 (預防鐵壁)"
+        case .streamerTricks: return "主流大師主播 (飛刀/陷阱反制)"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .autoAdaptive: return "AI自理"
+        case .carlsenEndgame: return "卡爾森"
+        case .nakamuraBlitz: return "中村光"
+        case .talAttack: return "塔爾強攻"
+        case .karpovPositional: return "鐵壁預防"
+        case .streamerTricks: return "主播飛刀"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .autoAdaptive: return "brain.head.profile"
+        case .carlsenEndgame: return "crown.fill"
+        case .nakamuraBlitz: return "bolt.fill"
+        case .talAttack: return "flame.circle.fill"
+        case .karpovPositional: return "shield.checkered"
+        case .streamerTricks: return "sparkles"
+        }
+    }
+
+    var tacticDescription: String {
+        switch self {
+        case .autoAdaptive:
+            return "AI 自動偵測局面張力、王翼安全、開中殘局階段與子力分佈，動態切換最適大師決策模型。"
+        case .carlsenEndgame:
+            return "效法 Magnus Carlsen：強化通路兵、雙象與殘局國王活躍度，無縫擠壓微小優勢。"
+        case .nakamuraBlitz:
+            return "效法 Hikaru Nakamura：高節奏搶佔先手、製造對手時間壓力與多線牽制反擊。"
+        case .talAttack:
+            return "效法 Mikhail Tal：重押王翼空間、閃電將軍、開放線重砲協同與主動攻殺。"
+        case .karpovPositional:
+            return "效法 Anatoly Karpov 與丁立人：嚴密預防對手突破，優先消滅弱點並佔據關鍵哨點。"
+        case .streamerTricks:
+            return "綜合 GothamChess / Eric Rosen 等主流大師主播實戰套路：識破飛刀、製造間接過渡著 (Zwischenzug)。"
+        }
+    }
+}
+
 enum BoardTheme: String, CaseIterable, Identifiable, Sendable {
     case glacierBlue = "glacierBlue"
     case classicGreen = "classicGreen"

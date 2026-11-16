@@ -84,6 +84,16 @@ struct EngineSettingsSheetView: View {
                     ))
                     .tint(Color(red: 0.50, green: 0.78, blue: 0.35))
 
+                    Picker("AI 大師自理決策模型", selection: $engineService.masterPersonaMode) {
+                        ForEach(MasterPersonaMode.allCases) { persona in
+                            Label(persona.displayName, systemImage: persona.icon).tag(persona)
+                        }
+                    }
+
+                    Text(engineService.masterPersonaMode.tacticDescription)
+                        .font(.caption)
+                        .foregroundColor(.cyan)
+
                     Picker("下棋風格 (防封擬人化)", selection: $engineService.playStyleMode) {
                         ForEach(PlayStyleMode.allCases) { style in
                             Label(style.displayName, systemImage: style.icon).tag(style)
@@ -242,7 +252,7 @@ struct EngineSettingsSheetView: View {
                     HStack {
                         Text("版本與更新層級")
                         Spacer()
-                        Text("v\(shortVer) (Build \(buildNum)) · 大更新")
+                        Text("v\(shortVer) (Build \(buildNum)) · AI訓練強化")
                             .font(.caption.bold().monospaced())
                             .foregroundColor(.cyan)
                     }
